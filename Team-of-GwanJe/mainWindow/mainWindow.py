@@ -598,6 +598,24 @@ class MainWindow(PageWindow):
         )
         self.patch_logo.setGeometry(*ws.patch_logo_geometry)
 
+        # patch22 logo
+        patch22_path = base_dir / '22patch.png'
+        self.patch22_logo = QLabel(self.container)
+        self.patch22_logo.setPixmap(
+            QPixmap(str(patch22_path))
+            .scaled(*ws.patch22_logo_geometry[2:4], Qt.KeepAspectRatio)
+        )
+        self.patch22_logo.setGeometry(*ws.patch22_logo_geometry)
+
+        # patch24 logo
+        patch24_path = base_dir / '24patch.png'
+        self.patch24_logo = QLabel(self.container)
+        self.patch24_logo.setPixmap(
+            QPixmap(str(patch24_path))
+            .scaled(*ws.patch24_logo_geometry[2:4], Qt.KeepAspectRatio)
+        )
+        self.patch24_logo.setGeometry(*ws.patch24_logo_geometry)
+
     #상단 메뉴바
     def initMenubar(self):
         self.statusBar()
