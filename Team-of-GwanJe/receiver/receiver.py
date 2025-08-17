@@ -1,115 +1,129 @@
-from struct import unpack
+from struct import unpack, calcsize
 from serial import Serial, PARITY_NONE, STOPBITS_TWO, EIGHTBITS
-from numpy import sum, around
 from threading import Thread
 from time import sleep
-#from datahub import Datahub
-
 import numpy as np
 
 
-##'A', 'B', len, hours, mins, secs, tenmilis, E, N, U, v_E, v_N, v_U, a_p, a_y, a_r, w_p, w_y, w_r, q_0, q_1, q_2, q_3, checksum, 'Z'
+# 패킷: 'A','B', len, hours, mins, secs, tenmilis,
+#       E, N, U, v_E, v_N, v_U, a_p, a_y, a_r, w_p, w_y, w_r, q_0, q_1, q_2, q_3,
+#       checksum, 'Z'
+
 ##'A', 'B', len, order, checksum, 'Z' 
 
 class Receiver(Thread):
     def __init__(self, datahub):
-        super().__init__( daemon=True )
+        super().__init__(daemon=True)
         self.datahub = datahub
         self.first_time = True
         self.ser = None
 
+        # 본문 포맷 (마지막 'Z' 제외): 4바이트 시간 + 16개 float + checksum(float)
+        self.DATA_FMT_BODY = '<BBBB16ff'
+        self.DATA_BODY_SIZE = calcsize(self.DATA_FMT_BODY)  # 4 + 16*4 + 4 = 72 bytes
+        self.DATA_PAYLOAD_SIZE = self.DATA_BODY_SIZE + 1    # + 'Z' 1바이트 = 73 bytes
 
-    def setSerial(self,myport,mybaudrate):
-            self.ser = Serial(port=myport,
-                                    baudrate = mybaudrate,
-                                    parity=PARITY_NONE,
-                                    stopbits=STOPBITS_TWO,
-                                    bytesize=EIGHTBITS,
-                                    timeout=0.1)
+    def setSerial(self, myport, mybaudrate):
+        self.ser = Serial(
+            port=myport,
+            baudrate=int(mybaudrate),
+            parity=PARITY_NONE,
+            stopbits=STOPBITS_TWO,
+            bytesize=EIGHTBITS,
+            timeout=0.1,
+        )
 
-    def _decode_data(self, data_bytes):
-        decode_data = unpack('<18f', data_bytes)
-        print(decode_data)
+    def _parse_and_update(self, payload: bytes):
+        """
+        payload: len 바이트로 읽은 '본문 + Z'
+        반환: True(성공) / False(실패)
+        """
+        if len(payload) != self.DATA_PAYLOAD_SIZE:
+            return False
 
-        if sum(decode_data[4:-1])-decode_data[-1]<1:
-            all_data = around(decode_data,4)
-            if len(all_data)>=1:
-                self.datahub.update(all_data)
+        # 트레일러 확인
+        if payload[-1] != ord('Z'):
+            return False
 
+        body = payload[:-1]  # 'Z' 제외
+
+        try:
+            # 언팩: (h, m, s, tm, 16 floats..., checksum)
+            unpacked = unpack(self.DATA_FMT_BODY, body)
+
+            hours, mins, secs, tenmilis = unpacked[:4]
+            floats16 = unpacked[4:-1]   # E..q3 (16개)
+            checksum = unpacked[-1]     # float checksum
+
+            #float32 기준 체크섬
+            calc = np.float32(hours + mins + secs + tenmilis + np.sum(np.array(floats16, dtype=np.float32)))
+
+            # 허용 오차 내 비교 (센서 부동소수 오차 여지)
+            if not np.isfinite(checksum) or abs(np.float32(checksum) - calc) > 1e-3:
+                return False
+
+            # Datahub에 넘길 배열 구성 (시간4 + 16 floats)
+            # 순서: hours, mins, secs, tenmilis,
+            #       E, N, U, v_E, v_N, v_U, a_p, a_y, a_r, w_p, w_y, w_r, q_0, q_1, q_2, q_3
+            out = np.array([hours, mins, secs, tenmilis, *floats16], dtype=np.float32)
+
+            # 기존 인터페이스 유지
+            self.datahub.update(out)
+            return True
+        except Exception:
+            return False
 
     def run(self):
-        
-        hdrf = 0
-        idxn = 0
-        
-        msgd = np.zeros( 74, dtype=np.uint8 )
-        
+        hdr_stage = 0  # 0:'A' 대기, 1:'B' 대기, 2:len/페이로드
         while True:
             try:
                 if self.datahub.iscommunication_start:
                     if self.first_time:
-                        self.setSerial( self.datahub.mySerialPort, self.datahub.myBaudrate )
-                        self.first_time=False
+                        self.setSerial(self.datahub.mySerialPort, self.datahub.myBaudrate)
+                        self.first_time = False
 
                     if not self.ser.is_open:
                         self.ser.open()
-                        print( "opened" )
 
-                    self.datahub.serial_port_error=0
-                    byte = self.ser.read()
-                    
-                    if ( hdrf == 2 ):
-                        msgd[idxn] = np.frombuffer( byte, np.uint8 )
-                        
-                        idxn += 1
+                    self.datahub.serial_port_error = 0
 
-                        if ( idxn == 74 ):
-                            data = np.frombuffer( msgd[2:], np.float32 )
-                            
-                            if ( np.sum( data[4:-1] ) == data[-1] ):
-                                # print( 'good' )
-                                
-                                self.datahub.update(data)
-                                
-                            hdrf = 0
-                            idxn = 0
-                         
-                    elif ( hdrf == 0 ):   
-                        if ( byte == b"A" ):
-                            msgd[idxn] = np.frombuffer( byte, np.uint8 )
-    
-                            hdrf += 1
-                            idxn += 1
-                            
-                        else:
-                            hdrf = 0
-                            idxn = 0
-                            
-                    elif ( hdrf == 1 ):
-                        if ( byte == b"B" ):
-                            msgd[idxn] = np.frombuffer( byte, np.uint8 )
-    
-                            hdrf += 1
-                            idxn += 1
-                            
-                        else:
-                            hdrf = 0
-                            idxn = 0
+                    b = self.ser.read(1)
+                    if not b:
+                        continue
 
-                    else:
-                        hdrf = 0
-                        idxn = 0
+                    if hdr_stage == 0:
+                        hdr_stage = 1 if b == b'A' else 0
+
+                    elif hdr_stage == 1:
+                        hdr_stage = 2 if b == b'B' else 0
+
+                    elif hdr_stage == 2:
+                        # len 바이트
+                        msg_len = b[0]
+                        # len만큼 본문('Z' 포함) 읽기
+                        payload = self.ser.read(msg_len)
+
+                        if self._parse_and_update(payload):
+                            # 정상 처리
+                            pass
+                        # 파싱 실패시에도 헤더 재동기화
+                        hdr_stage = 0
 
                 else:
-                    self.datahub.communication_start()
-
-                    if self.ser != None and self.ser.is_open :
+                    # 통신 OFF → 포트 닫고 잠깐 쉼
+                    if self.ser is not None and self.ser.is_open:
                         self.ser.close()
                     sleep(0.05)
-            except:
-                self.datahub.serial_port_error=1
+
+            except Exception:
+                # 포트 에러로 가정
+                self.datahub.serial_port_error = 1
+                hdr_stage = 0
+                sleep(0.05)
 
 
-if __name__=="__main__":
-    receiver = Receiver()
-    receiver.run()
+if __name__ == "__main__":
+    # 예시: datahub 주입 필요
+    # receiver = Receiver(datahub)
+    # receiver.start()
+    pass

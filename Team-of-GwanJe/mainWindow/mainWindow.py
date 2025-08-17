@@ -2,7 +2,8 @@ from PyQt5.QtWidgets import QApplication, QMainWindow, QGraphicsDropShadowEffect
 from pathlib import Path
 from PyQt5.QtCore import QThread, QUrl, QTimer, Qt, pyqtSignal, pyqtSlot
 from PyQt5.QtWebEngineWidgets import QWebEngineView
-from PyQt5.QtGui import QIcon, QPixmap
+from PyQt5.QtGui import QIcon, QPixmap, QVector3D
+import pyqtgraph as pg
 from pyqtgraph import PlotWidget, GridItem, AxisItem
 #################
 import numpy as np
@@ -20,6 +21,7 @@ from numpy.random import rand
 from numpy.linalg import norm
 
 from matplotlib.pyplot import figure
+from matplotlib.animation import FuncAnimation
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib import pyplot as plt
 
@@ -65,7 +67,7 @@ class GraphViewer_Thread(QThread):
         self.pw_angleSpeed.setGeometry(*ws.pw_angleSpeed_geometry)
         self.pw_accel.setGeometry(*ws.pw_accel_geometry)
         self.pw_speed.setGeometry(*ws.pw_speed_geometry)
-        
+          
         self.angleSpeed_title.setGeometry(*ws.angleSpeed_title_geometry)
         self.accel_title.setGeometry(*ws.accel_title_geometry)
         self.speed_title.setGeometry(*ws.speed_title_geometry)
@@ -73,6 +75,7 @@ class GraphViewer_Thread(QThread):
         self.angleSpeed_title.setFont(ws.font_angleSpeed_title)
         self.accel_title.setFont(ws.font_accel_title)
         self.speed_title.setFont(ws.font_speed_title)
+        
 
         self.pw_angleSpeed.addItem(GridItem())
         self.pw_accel.addItem(GridItem())
@@ -197,6 +200,196 @@ class GraphViewer_Thread(QThread):
         self.curve_yspeed.clear()
         self.curve_zspeed.clear()
 
+class RealTimeENUPlot(QThread):
+    def __init__(self, mainwindow, datahub,
+                 tail_len: int = 2000,
+                 update_ms: int = 50,
+                 vel_scale: float = 0.2):
+        
+        super().__init__()
+
+        self.QVector3D = QVector3D
+        self.mainwindow = mainwindow
+        self.datahub = datahub
+        self.tail_len = tail_len
+        self.update_ms = update_ms
+        self.vel_scale = vel_scale
+
+        # 내부 버퍼
+        from collections import deque
+        self.E_hist = deque(maxlen=tail_len)
+        self.N_hist = deque(maxlen=tail_len)
+        self.U_hist = deque(maxlen=tail_len)
+        self._last_count = 0
+        self._ref_lla = None
+        self._ref_ecef = None
+
+        # 뷰/아이템 (UI 스레드에서 생성)
+        self.trajectory_title = QLabel(self.mainwindow.container)
+        self.trajectory_title.setText("<b>&#8226; Trajectory</b>")
+        self.trajectory_title.setStyleSheet("color: white;")
+        self.trajectory_title.setFont(ws.font_trajectory_title)
+        self.trajectory_title.setGeometry(*ws.trajectory_title_geometry)   
+
+        self.view = gl.GLViewWidget(self.mainwindow.container)
+        geom = getattr(ws, "enu3d_geometry", ws.pw_trajectory_geometry)
+        self.view.setGeometry(*ws.pw_trajectory_geometry)
+        self.view.setWindowTitle("Trajectory")
+        self.view.setCameraPosition(distance=50)
+
+        self._add_axes()
+        self.traj_item = gl.GLLinePlotItem(pos=np.zeros((2, 3)), width=2, antialias=True)
+        self.view.addItem(self.traj_item)
+        self.head_item = gl.GLScatterPlotItem(pos=np.array([[0, 0, 0]]), size=8)
+        self.view.addItem(self.head_item)
+        self.vel_item = gl.GLLinePlotItem(pos=np.zeros((2, 3)), width=3, antialias=True)
+        self.view.addItem(self.vel_item)
+
+        # UI 스레드 타이머로 갱신(안전)
+        self.timer = QTimer(self.mainwindow)
+        self.timer.timeout.connect(self._update_plot)
+        self.timer.start(update_ms)
+
+    # ---------- 좌표 변환 ----------
+    @staticmethod
+    def _lla_to_ecef(lat_deg, lon_deg, h_m):
+        a = 6378137.0; f = 1/298.257223563; e2 = f*(2-f)
+        lat = np.deg2rad(lat_deg); lon = np.deg2rad(lon_deg)
+        sl, cl = np.sin(lat), np.cos(lat)
+        so, co = np.sin(lon), np.cos(lon)
+        N = a/np.sqrt(1 - e2*sl*sl)
+        x = (N+h_m)*cl*co; y = (N+h_m)*cl*so; z = (N*(1-e2)+h_m)*sl
+        return np.array([x, y, z], float)
+
+    @staticmethod
+    def _ecef_to_enu(xyz, ref_ecef, ref_lat_deg, ref_lon_deg):
+        lat = np.deg2rad(ref_lat_deg); lon = np.deg2rad(ref_lon_deg)
+        sl, cl = np.sin(lat), np.cos(lat)
+        so, co = np.sin(lon), np.cos(lon)
+        dx, dy, dz = xyz - ref_ecef
+        T = np.array([[-so,          co,           0],
+                      [-sl*co,   -sl*so,        cl],
+                      [ cl*co,    cl*so,        sl]])
+        return T @ np.array([dx, dy, dz])
+
+    def _ensure_ref_from_datahub(self):
+        if self._ref_lla is not None:
+            return
+        if hasattr(self.datahub, 'latitudes') and hasattr(self.datahub, 'longitudes') and len(self.datahub.latitudes) > 0:
+            lat0 = float(self.datahub.latitudes[0]); lon0 = float(self.datahub.longitudes[0])
+            h0 = float(self.datahub.altitude[0]) if hasattr(self.datahub, 'altitude') and len(self.datahub.altitude) > 0 else 0.0
+            self._ref_lla = (lat0, lon0, h0)
+            self._ref_ecef = self._lla_to_ecef(lat0, lon0, h0)
+
+    def _available_count(self):
+        if all(hasattr(self.datahub, n) for n in ('Easts','Norths','Ups')):
+            return min(len(self.datahub.Easts), len(self.datahub.Norths), len(self.datahub.Ups))
+        if hasattr(self.datahub,'latitudes') and hasattr(self.datahub,'longitudes'):
+            return min(len(self.datahub.latitudes), len(self.datahub.longitudes),
+                       len(self.datahub.altitude) if hasattr(self.datahub,'altitude') else 10**9)
+        return 0
+
+    def _get_dt(self, idx):
+        try:
+            h, m, s = float(self.datahub.hours[idx]), float(self.datahub.mins[idx]), float(self.datahub.secs[idx])
+            tm = float(self.datahub.tenmilis[idx])*0.01
+            h0, m0, s0 = float(self.datahub.hours[idx-1]), float(self.datahub.mins[idx-1]), float(self.datahub.secs[idx-1])
+            tm0 = float(self.datahub.tenmilis[idx-1])*0.01
+            return (h*3600+m*60+s+tm) - (h0*3600+m0*60+s0+tm0)
+        except Exception:
+            return None
+
+    def _get_velocity_sample(self, idx, fallback_from_pos=None):
+        if all(hasattr(self.datahub, n) for n in ('vE','vN','vU')):
+            try: return float(self.datahub.vE[idx]), float(self.datahub.vN[idx]), float(self.datahub.vU[idx])
+            except Exception: pass
+        if all(hasattr(self.datahub, n) for n in ('xspeed','yspeed','zspeed')):
+            try: return float(self.datahub.xspeed[idx]), float(self.datahub.yspeed[idx]), float(self.datahub.zspeed[idx])
+            except Exception: pass
+        if fallback_from_pos is not None and idx >= 1:
+            (E, N, U) = fallback_from_pos[idx]; (E0, N0, U0) = fallback_from_pos[idx-1]
+            dt = self._get_dt(idx)
+            if dt and dt > 1e-6:
+                return ((E-E0)/dt, (N-N0)/dt, (U-U0)/dt)
+        return (0.0, 0.0, 0.0)
+
+    def _pull_new_samples(self):
+        total = self._available_count()
+        if total <= self._last_count:
+            return None
+
+        idxs = range(self._last_count, total)
+        have_ENU = all(hasattr(self.datahub, n) for n in ('Easts','Norths','Ups'))
+        ENU = []
+
+        if have_ENU:
+            for i in idxs:
+                ENU.append((float(self.datahub.Easts[i]),
+                            float(self.datahub.Norths[i]),
+                            float(self.datahub.Ups[i])))
+        else:
+            self._ensure_ref_from_datahub()
+            if self._ref_lla is None:
+                return None
+            lat0, lon0, h0 = self._ref_lla
+            for i in idxs:
+                lat = float(self.datahub.latitudes[i]); lon = float(self.datahub.longitudes[i])
+                h = float(self.datahub.altitude[i]) if hasattr(self.datahub,'altitude') else 0.0
+                ecef = self._lla_to_ecef(lat, lon, h)
+                E, N, U = self._ecef_to_enu(ecef, self._ref_ecef, lat0, lon0)
+                ENU.append((E, N, U))
+
+        for E,N,U in ENU:
+            self.E_hist.append(E); self.N_hist.append(N); self.U_hist.append(U)
+
+        last_idx = total - 1
+        vE, vN, vU = self._get_velocity_sample(last_idx, fallback_from_pos=ENU if have_ENU else None)
+        self._last_count = total
+        return (vE, vN, vU)
+
+    def _add_axes(self):
+        x_axis = gl.GLLinePlotItem(pos=np.array([[0,0,0],[10,0,0]]), color=(1,0,0,1), width=2, antialias=True)
+        y_axis = gl.GLLinePlotItem(pos=np.array([[0,0,0],[0,10,0]]), color=(0,1,0,1), width=2, antialias=True)
+        z_axis = gl.GLLinePlotItem(pos=np.array([[0,0,0],[0,0,10]]), color=(0,0,1,1), width=2, antialias=True)
+        self.view.addItem(x_axis); self.view.addItem(y_axis); self.view.addItem(z_axis)
+
+    def _autoscale_camera(self):
+        if len(self.E_hist) < 2: return
+        e = np.array(self.E_hist); n = np.array(self.N_hist); u = np.array(self.U_hist)
+        e_mid = (e.min()+e.max())/2.0; n_mid = (n.min()+n.max())/2.0; u_mid = (u.min()+u.max())/2.0
+        max_range = max(e.max()-e.min(), n.max()-n.min(), u.max()-u.min())
+        dist = max(20.0, max_range*1.5)
+        self.view.opts['center'] = self.QVector3D(float(e_mid), float(n_mid), float(u_mid))
+        self.view.setCameraPosition(distance=dist)
+
+    def _update_plot(self):
+        out = self._pull_new_samples()
+        if out is None: return
+        vE, vN, vU = out
+
+        pos = np.column_stack([np.array(self.E_hist), np.array(self.N_hist), np.array(self.U_hist)])
+        if len(pos) >= 2:
+            self.traj_item.setData(pos=pos)
+
+        head = pos[-1].reshape(1,3)
+        self.head_item.setData(pos=head)
+
+        vel_end = head[0] + np.array([vE, vN, vU]) * self.vel_scale
+        self.vel_item.setData(pos=np.vstack([head[0], vel_end]))
+
+        self._autoscale_camera()
+
+    # QThread 수명주기
+    def run(self):
+        self.exec_()   # 별도 타이머는 없지만, 일관성 있게 스레드 루프 유지
+
+    def stop(self):
+        try:
+            self.timer.stop()
+        except Exception:
+            pass
+        self.quit()
+        self.wait(1000)
 
 class MapViewer_Thread(QThread):
     def __init__(self, mainwindow, datahub):
@@ -498,9 +691,11 @@ class MainWindow(PageWindow):
         self.mapviewer = MapViewer_Thread(self,datahub)
         self.graphviewer = GraphViewer_Thread(self,datahub)
         self.rocketviewer = RocketViewer_Thread(self,datahub)
+        self.enuviewer = RealTimeENUPlot(self, datahub)  # ENU 3D 뷰어
 
         self.initMenubar()
 
+        self.enuviewer.start()
         self.mapviewer.start()
         self.graphviewer.start()
         self.rocketviewer.start()
@@ -837,9 +1032,9 @@ class MainWindow(PageWindow):
     def xspeed_hide_checkbox_state(self,state):
         self.graphviewer.curve_xspeed.setVisible(state != Qt.Checked)
     def yspeed_hide_checkbox_state(self,state):
-        self.graphviewer.curve_xspeed.setVisible(state != Qt.Checked)
+        self.graphviewer.curve_yspeed.setVisible(state != Qt.Checked)
     def zspeed_hide_checkbox_state(self,state):
-        self.graphviewer.curve_xspeed.setVisible(state != Qt.Checked)        
+        self.graphviewer.curve_zspeed.setVisible(state != Qt.Checked)        
     def rollspeed_hide_checkbox_state(self,state):
         self.graphviewer.curve_rollSpeed.setVisible(state != Qt.Checked)
     def pitchspeed_hide_checkbox_state(self,state):
@@ -1152,4 +1347,8 @@ class window(QMainWindow):
     def closeEvent(self, event):
         self.datahub.communication_stop()
         self.datahub.datasaver_stop()
+        try:
+            self.mainwindow.enuviewer.stop()
+        except Exception:
+            pass
         event.accept()

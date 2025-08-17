@@ -94,6 +94,9 @@ checker_font.setPointSize(10)
 font_guideText = QFont()
 font_guideText.setPointSize(10)
 
+font_trajectory_title = QFont()
+font_trajectory_title.setPointSize(13)
+
 font_angle_title = QFont()
 font_angle_title.setPointSize(13)
 
