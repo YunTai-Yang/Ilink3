@@ -48,7 +48,7 @@ class Master:
         
         self.datasaver.start()
 
-        self.mainWindow.start() 
+        self.mainWindow.start()
         
         self.mainWindow.setEventLoop()
 

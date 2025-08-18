@@ -11,19 +11,32 @@ b = height
 # a : 가로, b : 세로
 full_size = np.array([a,b]).astype(int)
 
+btn_x0   = a * 0.72     # 패널 좌상단 x
+btn_y0   = b * 0.42     # 패널 좌상단 y
+btn_w    = a * 0.085    # 버튼 가로
+btn_h    = b * 0.050    # 버튼 세로
+btn_hgap = a * 0.010    # 가로 간격
+btn_vgap = b * 0.015    # 세로 간격
+
+# row-major (윗줄→아랫줄, 각 줄 3개)
+buttons_geometry = np.array([
+    [btn_x0 + c*(btn_w+btn_hgap),  btn_y0 + r*(btn_h+btn_vgap),  btn_w, btn_h]
+    for r in range(3) for c in range(3)
+]).astype(int)
+
 mainwindow_color = "background-color: rgb(0,0,0);"
 webEngine_geometry = np.array([a*0.001,  b*0.001,  b*0.0001, b*0.0001]).astype(int)
 
 # graph geometry
-pw_speed_geometry = np.array([a*0.05,  b*0.17,  a*0.25,  b*0.24]).astype(int)
-pw_angleSpeed_geometry = np.array([a*0.05,  b*0.45,  a*0.25,  b*0.24]).astype(int)
-pw_accel_geometry = np.array([a*0.05,  b*0.73,  a*0.25,  b*0.24]).astype(int)
+pw_speed_geometry = np.array([a*0.05,  b*0.17,  a*0.25,  b*0.23]).astype(int)
+pw_angleSpeed_geometry = np.array([a*0.05,  b*0.435,  a*0.25,  b*0.23]).astype(int)
+pw_accel_geometry = np.array([a*0.05,  b*0.71,  a*0.25,  b*0.23]).astype(int)
 pw_altitude_geometry = np.array([a*0.74, b*0.45, a*0.25, b*0.24]).astype(int)
-pw_trajectory_geometry = np.array([a*0.74, b*0.17, a*0.25, b*0.24]).astype(int)
+pw_trajectory_geometry = np.array([a*0.74, b*0.23, a*0.25, b*0.18]).astype(int)
 
 speed_title_geometry = np.array([a*0.1, b*0.145, 170, 36]).astype(int)
-angleSpeed_title_geometry = np.array([a*0.1, b*0.425, 245, 36]).astype(int)
-accel_title_geometry = np.array([a*0.1, b*0.705, 245, 40]).astype(int)
+angleSpeed_title_geometry = np.array([a*0.1, b*0.41, 245, 36]).astype(int)
+accel_title_geometry = np.array([a*0.1, b*0.68, 245, 40]).astype(int)
 altitude_title_geometry = np.array([a*0.85, b*0.425, 245, 37]).astype(int)
 trajectory_title_geometry = np.array([a*0.85, b*0.145, 245, 37]).astype(int)
 
@@ -32,13 +45,13 @@ vx_checker_geometry = np.array([a*0.01,  b*0.21,  100,  50]).astype(int)
 vy_checker_geometry = np.array([a*0.01, b*0.25,  100,  50]).astype(int)
 vz_checker_geometry = np.array([a*0.01,   b*0.29,  100,  50]).astype(int)
 
-rollS_checker_geomoetry = np.array([a*0.01,  b*0.50, 100,  50]).astype(int)
-pitchS_checker_geomoetry = np.array([a*0.01,  b*0.54, 100,  50]).astype(int)
-yawS_checker_geomoetry = np.array([a*0.01,  b*0.58, 100,  50]).astype(int)
+rollS_checker_geomoetry = np.array([a*0.01,  b*0.485, 100,  50]).astype(int)
+pitchS_checker_geomoetry = np.array([a*0.01,  b*0.525, 100,  50]).astype(int)
+yawS_checker_geomoetry = np.array([a*0.01,  b*0.565, 100,  50]).astype(int)
 
-ax_checker_geomoetry = np.array([a*0.01,  b*0.78,  100,  30]).astype(int)
-ay_checker_geomoetry = np.array([a*0.01,  b*0.82,  100,  30]).astype(int)
-az_checker_geomoetry = np.array([a*0.01,  b*0.86,  100,  30]).astype(int)
+ax_checker_geomoetry = np.array([a*0.01,  b*0.765,  100,  30]).astype(int)
+ay_checker_geomoetry = np.array([a*0.01,  b*0.805,  100,  30]).astype(int)
+az_checker_geomoetry = np.array([a*0.01,  b*0.845,  100,  30]).astype(int)
 
 # gps map
 map_geometry = np.array([a*0.79,  b*0.73,  a*0.20,  a*0.12]).astype(int)
@@ -56,6 +69,20 @@ start_geometry = np.array([a*0.45, b*0.85, 0.08*a,  0.05*a ]).astype(int)
 stop_geometry = np.array([a*0.57, b*0.85, 0.08*a, 0.05*a]).astype(int)
 reset_geometry = np.array([a*0.33, b*0.85, 0.08*a, 0.05*a]).astype(int)
 status_geometry = np.array([a*0.67, b*0.79, 0.1*a, 0.05*a]).astype(int)
+
+# buttons geometry
+launch1_geometry = np.array([a*0.77, b*0.54, 0.035*a,  0.035*a ]).astype(int)
+launch2_geometry = np.array([a*0.77, b*0.44, 0.035*a,  0.035*a ]).astype(int)
+
+launch_stop_geometry = np.array([a*0.95, b*0.54, 0.035*a,  0.035*a ]).astype(int)
+emergency_staging_geometry = np.array([a*0.95, b*0.44, 0.035*a,  0.035*a ]).astype(int)
+
+emergency_parachute_geometry = np.array([a*0.84, b*0.44, 0.035*a,  0.035*a ]).astype(int)
+staging_stop_geometry = np.array([a*0.88, b*0.44, 0.035*a,  0.035*a ]).astype(int)
+nc1_geometry = np.array([a*0.8245, b*0.54, 0.035*a,  0.035*a ]).astype(int)
+nc2_geometry = np.array([a*0.86, b*0.54, 0.035*a,  0.035*a ]).astype(int)
+nc3_geometry = np.array([a*0.8955, b*0.54, 0.035*a,  0.035*a ]).astype(int)
+
 
 # rocket animation
 model_geometry = np.array([a*0.30,  b*0.14,  a*0.44, a*0.25]).astype(int)
@@ -120,6 +147,9 @@ font_stop_text.setPointSize(20)
 
 font_reset_text = QFont()
 font_reset_text.setPointSize(20)
+
+font_button_text = QFont()
+font_button_text.setPointSize(7)
 
 font_status_text = QFont()
 font_status_text.setFamily("VCR OSD Mono")
@@ -197,6 +227,7 @@ max_accel_label_geometry = np.array([a*0.75,  b*0.15+100,  300, 50]).astype(int)
 max_altitude_geometry = np.array([a*0.75+400,  b*0.15,  300, 50]).astype(int)
 max_speed_geometry = np.array([a*0.75+400,  b*0.15+50,  300, 50]).astype(int)
 max_accel_geometry = np.array([a*0.75+400,  b*0.15+100,  300, 50]).astype(int)
+
 
 
 

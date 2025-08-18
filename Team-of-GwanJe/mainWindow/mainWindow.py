@@ -1,8 +1,8 @@
-from PyQt5.QtWidgets import QApplication, QMainWindow, QGraphicsDropShadowEffect , QPushButton,QLineEdit, QLabel, QMessageBox, QInputDialog, QCheckBox, QStackedWidget, QAction, QFrame, QWidget, QVBoxLayout
+from PyQt5.QtWidgets import QShortcut, QApplication, QMainWindow, QGraphicsDropShadowEffect , QPushButton,QLineEdit, QLabel, QMessageBox, QInputDialog, QCheckBox, QStackedWidget, QAction, QFrame, QWidget, QVBoxLayout
 from pathlib import Path
 from PyQt5.QtCore import QThread, QUrl, QTimer, Qt, pyqtSignal, pyqtSlot
 from PyQt5.QtWebEngineWidgets import QWebEngineView
-from PyQt5.QtGui import QIcon, QPixmap, QVector3D
+from PyQt5.QtGui import QIcon, QPixmap, QVector3D, QKeySequence
 import pyqtgraph as pg
 from pyqtgraph import PlotWidget, GridItem, AxisItem
 #################
@@ -37,7 +37,6 @@ class PageWindow(QMainWindow):
     gotoSignal = pyqtSignal(str)
     def goto(self, name):
         self.gotoSignal.emit(name)
-
 
 class GraphViewer_Thread(QThread):
     def __init__(self, mainwindow,datahub):
@@ -245,6 +244,8 @@ class RealTimeENUPlot(QThread):
         self.vel_item = gl.GLLinePlotItem(pos=np.zeros((2, 3)), width=3, antialias=True)
         self.view.addItem(self.vel_item)
 
+        self._add_legend()  # ENU RGB legend overlay
+
         # UI 스레드 타이머로 갱신(안전)
         self.timer = QTimer(self.mainwindow)
         self.timer.timeout.connect(self._update_plot)
@@ -378,6 +379,40 @@ class RealTimeENUPlot(QThread):
         self.vel_item.setData(pos=np.vstack([head[0], vel_end]))
 
         self._autoscale_camera()
+
+    def _add_legend(self):
+        """GLViewWidget 위에 ENU(R,G,B) 범례를 반투명 오버레이로 표시."""
+        # GLViewWidget 위치 기준으로 좌상단에 작게 띄우기
+        vx, vy, vw, vh = ws.pw_trajectory_geometry  # (x, y, w, h)
+        pad = 10
+        box_w, box_h = 140, 80
+
+        self.legend_bg = QFrame(self.mainwindow.container)
+        self.legend_bg.setGeometry(vx + pad, vy + pad, box_w, box_h)
+        self.legend_bg.setStyleSheet("""
+            QFrame {
+                background-color: rgba(0,0,0,160);
+                border-radius: 8px;
+            }
+        """)
+        # 마우스 이벤트 투과 (씬 회전/줌 방해 X)
+        self.legend_bg.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.legend_bg.show()
+
+        def add_row(y, rgb, text):
+            r, g, b = rgb
+            sw = QFrame(self.legend_bg)
+            sw.setGeometry(10, y, 16, 16)
+            sw.setStyleSheet(f"background-color: rgb({r},{g},{b}); border: 1px solid rgba(255,255,255,140); border-radius: 3px;")
+
+            lb = QLabel(text, self.legend_bg)
+            lb.setGeometry(34, y-2, box_w-44, 20)
+            lb.setStyleSheet("color: white;")
+
+        # ENU with RGB
+        add_row(12, (255,   0,   0), "E (East)  — Red")
+        add_row(34, (  0, 255,   0), "N (North) — Green")
+        add_row(56, (  0,   0, 255), "U (Up)    — Blue")
 
     # QThread 수명주기
     def run(self):
@@ -676,6 +711,7 @@ class MainWindow(PageWindow):
     def __init__(self, datahub):
         super().__init__()
         self.datahub = datahub
+
         # ▶ 중앙 컨테이너 생성
         self.container = QWidget(self)
         self.setCentralWidget(self.container)
@@ -708,18 +744,40 @@ class MainWindow(PageWindow):
         self.start_button = QPushButton("Start",self.container)
         self.stop_button = QPushButton("Stop",self.container)
         self.reset_button = QPushButton("Reset",self.container)
+
+        self.launch1_button = QPushButton("Launch_1",self.container)
+        self.launch2_button = QPushButton("Launch_2",self.container)
+        self.launch_stop_button = QPushButton("Launch\nStop",self.container)
+        self.emergency_parachute_button = QPushButton("Emer\nParachute",self.container)
+        self.staging_stop_button = QPushButton("Staging\nStop",self.container)
+        self.emergency_staging_button = QPushButton("Emer\nStagigng",self.container)
+        self.nc1_button = QPushButton("NC_1",self.container)
+        self.nc2_button = QPushButton("NC_2",self.container)
+        self.nc3_button = QPushButton("NC_3",self.container)
+
         self.now_status = QLabel(ws.wait_status,self.container)
         self.rf_port_edit = QLineEdit("COM8",self.container)
         self.port_text = QLabel("Port:",self.container)
         self.baudrate_edit = QLineEdit("115200",self.container)
         self.baudrate_text = QLabel("Baudrate:",self.container)
         self.guide_text = QLabel(ws.guide,self.container)
-        self.port_text.setStyleSheet("color: white;")  
+        self.port_text.setStyleSheet("color: white;")
         self.baudrate_text.setStyleSheet("color: white;")
 
         self.start_button.setFont(ws.font_start_text)
         self.stop_button.setFont(ws.font_stop_text)
         self.reset_button.setFont(ws.font_reset_text)
+
+        self.launch1_button.setFont(ws.font_button_text)
+        self.launch2_button.setFont(ws.font_button_text)
+        self.launch_stop_button.setFont(ws.font_button_text)
+        self.emergency_parachute_button.setFont(ws.font_button_text)
+        self.staging_stop_button.setFont(ws.font_button_text)
+        self.emergency_staging_button.setFont(ws.font_button_text)
+        self.nc1_button.setFont(ws.font_button_text)
+        self.nc2_button.setFont(ws.font_button_text)
+        self.nc3_button.setFont(ws.font_button_text)
+
         self.rf_port_edit.setStyleSheet("background-color: rgb(255,255,255);")
         self.baudrate_edit.setStyleSheet("background-color: rgb(255,255,255);")
         self.start_button.setStyleSheet("background-color: rgb(200,0,0); color: rgb(250, 250, 250);font-weight: bold; font-weight: bold; border-radius: 25px;")
@@ -755,6 +813,39 @@ class MainWindow(PageWindow):
         self.start_button.setGeometry(*ws.start_geometry)
         self.stop_button.setGeometry(*ws.stop_geometry)
         self.reset_button.setGeometry(*ws.reset_geometry)
+
+        self.launch1_button.setGeometry(*ws.launch1_geometry)
+        self.launch2_button.setGeometry(*ws.launch2_geometry)
+        self.launch_stop_button.setGeometry(*ws.launch_stop_geometry)
+        self.emergency_parachute_button.setGeometry(*ws.emergency_parachute_geometry)
+        self.staging_stop_button.setGeometry(*ws.staging_stop_geometry)
+        self.emergency_staging_button.setGeometry(*ws.emergency_staging_geometry)
+        self.nc1_button.setGeometry(*ws.nc1_geometry)
+        self.nc2_button.setGeometry(*ws.nc2_geometry)
+        self.nc3_button.setGeometry(*ws.nc3_geometry)
+
+        self._toggle_labels = {}
+        def setup_toggle(btn, on_text, off_text, initial=False):
+            base = btn.text()
+            self._toggle_labels[btn] = (f"{base}: {on_text}", f"{base}: {off_text}")
+            btn.setCheckable(True)
+            btn.setChecked(initial)
+            on_label, off_label = self._toggle_labels[btn]
+            btn.setText(on_label if initial else off_label)
+            self._apply_toggle_style(btn, initial)
+            btn.toggled.connect(lambda checked, b=btn: self.on_toggle(b, checked))
+
+        # 라벨은 용도 맞춰 커스텀(필요시 수정 가능)
+        setup_toggle(self.launch1_button,            on_text="\nARMED",  off_text="\nSAFE",   initial=False)
+        setup_toggle(self.launch2_button,            on_text="\nARMED",  off_text="\nSAFE",   initial=False)
+        setup_toggle(self.launch_stop_button,        on_text="\nACTIVE", off_text="\nIDLE",   initial=False)
+        setup_toggle(self.emergency_parachute_button,on_text="\nREADY",  off_text="\nIDLE",   initial=False)
+        setup_toggle(self.staging_stop_button,       on_text="\nACTIVE", off_text="\nIDLE",   initial=False)
+        setup_toggle(self.emergency_staging_button,  on_text="\nREADY",  off_text="\nIDLE",   initial=False)
+        setup_toggle(self.nc1_button,                on_text="\nON",     off_text="\nOFF",    initial=False)
+        setup_toggle(self.nc2_button,                on_text="\nON",     off_text="\nOFF",    initial=False)
+        setup_toggle(self.nc3_button,                on_text="\nON",     off_text="\nOFF",    initial=False)
+
         self.port_text.setGeometry(*ws.port_text_geometry)
         self.rf_port_edit.setGeometry(*ws.port_edit_geometry)
         self.baudrate_text.setGeometry(*ws.baudrate_text_geometry)
@@ -810,7 +901,7 @@ class MainWindow(PageWindow):
             .scaled(*ws.patch24_logo_geometry[2:4], Qt.KeepAspectRatio)
         )
         self.patch24_logo.setGeometry(*ws.patch24_logo_geometry)
-
+    
     #상단 메뉴바
     def initMenubar(self):
         self.statusBar()
@@ -904,6 +995,42 @@ class MainWindow(PageWindow):
 
     def gosub(self):
         self.goto("sub")
+
+    def _apply_toggle_style(self, btn, checked: bool):
+        if checked:
+            btn.setStyleSheet(
+                "background-color: rgb(20,120,40); color: white; font-weight: bold; border-radius: 12px;"
+            )
+        else:
+            btn.setStyleSheet(
+                "background-color: rgb(60,60,70); color: white; border-radius: 12px;"
+            )
+    
+    def on_toggle(self, btn, checked: bool):
+        """토글 상태 변경 시 라벨/스타일 갱신 + (선택) 실제 동작"""
+        # 1) 라벨/스타일 갱신
+        on_label, off_label = self._toggle_labels[btn]
+        btn.setText(on_label if checked else off_label)
+        self._apply_toggle_style(btn, checked)
+
+        if btn is self.launch1_button:
+            self._send_cmd("LAUNCH1_ARM" if checked else "LAUNCH1_SAFE")
+        elif btn is self.launch2_button:
+            self._send_cmd("LAUNCH2_ARM" if checked else "LAUNCH2_SAFE")
+        elif btn is self.launch_stop_button:
+            self._send_cmd("LAUNCH_STOP_ON" if checked else "LAUNCH_STOP_OFF")
+        elif btn is self.emergency_parachute_button:
+            self._send_cmd("PARACHUTE_READY" if checked else "PARACHUTE_IDLE")
+        elif btn is self.staging_stop_button:
+            self._send_cmd("STAGING_STOP_ON" if checked else "STAGING_STOP_OFF")
+        elif btn is self.emergency_staging_button:
+            self._send_cmd("EMER_STAGING_READY" if checked else "EMER_STAGING_IDLE")
+        elif btn is self.nc1_button:
+            self._send_cmd("NC1_ON" if checked else "NC1_OFF")
+        elif btn is self.nc2_button:
+            self._send_cmd("NC2_ON" if checked else "NC2_OFF")
+        elif btn is self.nc3_button:
+            self._send_cmd("NC3_ON" if checked else "NC3_OFF")
 
     # Run when start button is clicked
     def start_button_clicked(self):
@@ -1047,6 +1174,52 @@ class MainWindow(PageWindow):
         self.graphviewer.curve_yaccel.setVisible(state != Qt.Checked)
     def zacc_hide_checkbox_state(self,state):
         self.graphviewer.curve_zaccel.setVisible(state != Qt.Checked)
+
+    def _install_shortcuts_clicked(self):
+        """단축키로 실제 버튼 .click()을 호출한다.
+        → 마우스 클릭과 동일하게 clicked/toggled 시그널이 흐름."""
+        self._shortcuts = []  # 가비지 컬렉션 방지용 보관
+
+        # 단축키 → 버튼.click 매핑
+        mapping = {
+            "F5":   self.start_button.click,       # Start
+            "F6":   self.stop_button.click,        # Stop
+            "F9":   self.reset_button.click,       # Reset
+
+            "Alt+1": self.launch1_button.click,    # Launch_1 (토글)
+            "Alt+2": self.launch2_button.click,    # Launch_2 (토글)
+            "Alt+3": self.launch_stop_button.click,# Launch_Stop (토글)
+
+            "Alt+4": self.emergency_parachute_button.click,  # Emer_Parachute (토글)
+            "Alt+5": self.staging_stop_button.click,         # Staging_Stop (토글)
+            "Alt+6": self.emergency_staging_button.click,    # Emer_Stagigng (토글)
+
+            "Alt+7": self.nc1_button.click,        # NC_1 (토글)
+            "Alt+8": self.nc2_button.click,        # NC_2 (토글)
+            "Alt+9": self.nc3_button.click,        # NC_3 (토글)
+        }
+
+        for seq, func in mapping.items():
+            sc = QShortcut(QKeySequence(seq), self)
+            # 페이지 어디에 포커스가 있어도 동작하게 전역 컨텍스트로
+            sc.setContext(Qt.ApplicationShortcut)
+            sc.activated.connect(func)
+            self._shortcuts.append(sc)
+
+        # 각 버튼 툴팁에 단축키 표시(선택)
+        for seq, func in mapping.items():
+            # func는 button.click이므로, button 객체를 다시 얻어온다
+            # (람다/partial로 버튼을 같이 보관해도 좋지만, 여기선 간단히 매핑 한번 더 해줌)
+            pass
+
+        button_by_seq = {
+            "F5": self.start_button, "F6": self.stop_button, "F9": self.reset_button,
+            "Alt+1": self.launch1_button, "Alt+2": self.launch2_button, "Alt+0": self.launch_stop_button,
+            "Alt+P": self.emergency_parachute_button, "Alt+G": self.staging_stop_button, "Alt+E": self.emergency_staging_button,
+            "Alt+Z": self.nc1_button, "Alt+X": self.nc2_button, "Alt+C": self.nc3_button,
+        }
+        for seq, btn in button_by_seq.items():
+            btn.setToolTip((btn.toolTip() + " | " if btn.toolTip() else "") + f"Shortcut: {seq}")
 
 
 class TimeAxisItem(AxisItem):
