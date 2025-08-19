@@ -1,4 +1,4 @@
-from PyQt5.QtWidgets import QShortcut, QApplication, QMainWindow, QGraphicsDropShadowEffect , QPushButton,QLineEdit, QLabel, QMessageBox, QInputDialog, QCheckBox, QStackedWidget, QAction, QFrame, QWidget, QVBoxLayout
+from PyQt5.QtWidgets import QShortcut, QApplication, QMainWindow, QGraphicsDropShadowEffect , QPushButton,QLineEdit, QLabel, QMessageBox, QInputDialog, QCheckBox, QStackedWidget, QAction, QFrame, QWidget, QVBoxLayout, QFileDialog
 from pathlib import Path
 from PyQt5.QtCore import QThread, QUrl, QTimer, Qt, pyqtSignal, pyqtSlot
 from PyQt5.QtWebEngineWidgets import QWebEngineView
@@ -15,6 +15,7 @@ import pyqtgraph.opengl as gl
 import sys
 import os
 import pandas as pd
+import time
 #################
 from numpy import zeros, array, cross, reshape, sin, cos, deg2rad, rad2deg
 from numpy.random import rand
@@ -32,6 +33,10 @@ from sys import exit, argv
 from pandas import read_csv
 
 from . import widgetStyle as ws
+
+COLUMN_NAMES = [
+    "hours","mins","secs","tenmilis","E","N","U","v_E","v_N","v_U","a_p","a_y","a_r","q_0","q_1","q_2","q_3","w_p","w_y","w_r"
+]
 
 class PageWindow(QMainWindow):
     gotoSignal = pyqtSignal(str)
@@ -125,57 +130,88 @@ class GraphViewer_Thread(QThread):
         self.starttime = 0.0
 
     def update_data(self):
-        if len(self.datahub.speed) == 0:
-            pass
+        # 1) 데이터 유무 체크: vE 기준이 가장 확실
+        n_total = len(self.datahub.vE)
+        if n_total == 0:
+            return
+
+        # 2) 타겟 길이 결정
+        win = self.x_ran
+        if n_total <= win:
+            n = n_total
+
+            # --- 각속도 ---
+            self.rollSpeed[-n:]  = self.datahub.rollSpeeds[-n:]
+            self.pitchSpeed[-n:] = self.datahub.pitchSpeeds[-n:]
+            self.yawSpeed[-n:]   = self.datahub.yawSpeeds[-n:]
+
+            # --- 가속도 ---
+            self.xaccel[-n:] = self.datahub.Xaccels[-n:]
+            self.yaccel[-n:] = self.datahub.Yaccels[-n:]
+            self.zaccel[-n:] = self.datahub.Zaccels[-n:]
+
+            # --- 속도 성분 (vE/vN/vU) ---
+            self.xspeed[-n:] = self.datahub.vE[-n:]
+            self.yspeed[-n:] = self.datahub.vN[-n:]
+            self.zspeed[-n:] = self.datahub.vU[-n:]
+
+            # --- 시간축 ---
+            if len(self.datahub.t) >= n:
+                self.time[-n:] = self.datahub.t[-n:]
+            else:
+                # 보조 계산(밀리초 → 초): /1000.0
+                hours  = self.datahub.hours[-n:] * 3600.0
+                minutes= self.datahub.mins[-n:]  * 60.0
+                seconds= self.datahub.secs[-n:]
+                millis = self.datahub.tenmilis[-n:] / 1000.0
+                t_abs = hours + minutes + seconds + millis
+                t0 = (self.datahub.hours[0]*3600.0 + self.datahub.mins[0]*60.0
+                    + self.datahub.secs[0] + self.datahub.tenmilis[0]/1000.0)
+                self.time[-n:] = t_abs - t0
 
         else:
-            if len(self.datahub.speed) <= self.x_ran :
-                n = len(self.datahub.speed) 
-                self.rollSpeed[-n:] = self.datahub.rollSpeeds[-n:]
-                self.pitchSpeed[-n:] = self.datahub.pitchSpeeds[-n:]
-                self.yawSpeed[-n:] = self.datahub.yawSpeeds[-n:]
-                self.xaccel[-n:] = self.datahub.Xaccels[-n:]
-                self.yaccel[-n:] = self.datahub.Yaccels[-n:]
-                self.zaccel[-n:] = self.datahub.Zaccels[-n:]
-                self.xspeed[-n:] = self.datahub.speed[-n:]
-                self.yspeed[-n:] = self.datahub.yspeed[-n:]
-                self.zspeed[-n:] = self.datahub.zspeed[-n:]
-                hours = self.datahub.hours[-n:] * 3600
-                minutes = self.datahub.mins[-n:] * 60
-                miliseconds = self.datahub.tenmilis[-n:] * 0.01
-                seconds = self.datahub.secs[-n:]
-                totaltime = hours + minutes + miliseconds + seconds
-                self.starttime = self.datahub.hours[0]*3600 + self.datahub.mins[0]*60 + self.datahub.tenmilis[0]*0.01+ self.datahub.secs[0]
-                self.time[-n:] = totaltime - self.starttime
-            
-            else : 
-                self.rollSpeed[:] = self.datahub.rollSpeeds[-self.x_ran:]
-                self.pitchSpeed[:] = self.datahub.pitchSpeeds[-self.x_ran:]
-                self.yawSpeed[:] = self.datahub.yawSpeeds[-self.x_ran:]
-                self.xaccel[:] = self.datahub.Xaccels[-self.x_ran:]
-                self.yaccel[:] = self.datahub.Yaccels[-self.x_ran:]
-                self.zaccel[:] = self.datahub.Zaccels[-self.x_ran:]
-                self.xspeed[:] = self.datahub.speed[-self.x_ran:]
-                self.yspeed[:] = self.datahub.yspeed[-self.x_ran:]
-                self.zspeed[:] = self.datahub.zspeed[-self.x_ran:]               
-                hours = self.datahub.hours[-self.x_ran:] * 3600
-                minutes = self.datahub.mins[-self.x_ran:] * 60
-                miliseconds = self.datahub.tenmilis[-self.x_ran:] * 0.01
-                seconds = self.datahub.secs[-self.x_ran:]
-                totaltime = hours + minutes + miliseconds + seconds
-                self.time[:] = totaltime - self.starttime
+            # 최근 win개만 표시
+            s = -win
 
-            self.curve_rollSpeed.setData(x=self.time, y=self.rollSpeed)
-            self.curve_pitchSpeed.setData(x=self.time, y=self.pitchSpeed)
-            self.curve_yawSpeed.setData(x=self.time, y=self.yawSpeed)
+            # --- 각속도 ---
+            self.rollSpeed[:]  = self.datahub.rollSpeeds[s:]
+            self.pitchSpeed[:] = self.datahub.pitchSpeeds[s:]
+            self.yawSpeed[:]   = self.datahub.yawSpeeds[s:]
 
-            self.curve_xaccel.setData(x=self.time, y=self.xaccel)
-            self.curve_yaccel.setData(x=self.time, y=self.yaccel)
-            self.curve_zaccel.setData(x=self.time, y=self.zaccel)
-                        
-            self.curve_xspeed.setData(x=self.time, y=self.xspeed)
-            self.curve_yspeed.setData(x=self.time, y=self.yspeed)
-            self.curve_zspeed.setData(x=self.time, y=self.zspeed)
+            # --- 가속도 ---
+            self.xaccel[:] = self.datahub.Xaccels[s:]
+            self.yaccel[:] = self.datahub.Yaccels[s:]
+            self.zaccel[:] = self.datahub.Zaccels[s:]
+
+            # --- 속도 성분 ---
+            self.xspeed[:] = self.datahub.vE[s:]
+            self.yspeed[:] = self.datahub.vN[s:]
+            self.zspeed[:] = self.datahub.vU[s:]
+
+            # --- 시간축 ---
+            if len(self.datahub.t) >= win:
+                self.time[:] = self.datahub.t[s:]
+            else:
+                hours  = self.datahub.hours[s:] * 3600.0
+                minutes= self.datahub.mins[s:]  * 60.0
+                seconds= self.datahub.secs[s:]
+                millis = self.datahub.tenmilis[s:] / 1000.0
+                t_abs = hours + minutes + seconds + millis
+                # 윈도 첫 샘플 기준 0
+                self.time[:] = t_abs - t_abs[0]
+
+        # 3) 그래프 업데이트
+        self.curve_rollSpeed.setData(x=self.time, y=self.rollSpeed)
+        self.curve_pitchSpeed.setData(x=self.time, y=self.pitchSpeed)
+        self.curve_yawSpeed.setData(x=self.time, y=self.yawSpeed)
+
+        self.curve_xaccel.setData(x=self.time, y=self.xaccel)
+        self.curve_yaccel.setData(x=self.time, y=self.yaccel)
+        self.curve_zaccel.setData(x=self.time, y=self.zaccel)
+
+        self.curve_xspeed.setData(x=self.time, y=self.xspeed)
+        self.curve_yspeed.setData(x=self.time, y=self.yspeed)
+        self.curve_zspeed.setData(x=self.time, y=self.zspeed)
 
     def graph_clear(self):
 
@@ -414,6 +450,46 @@ class RealTimeENUPlot(QThread):
         add_row(34, (  0, 255,   0), "N (North) — Green")
         add_row(56, (  0,   0, 255), "U (Up)    — Blue")
 
+    def trajectory_clear(self):
+        # 1) 내부 버퍼/카운터 초기화
+        try:
+            self.E_hist.clear()
+            self.N_hist.clear()
+            self.U_hist.clear()
+        except Exception:
+            # deque가 아니거나 초기화 실패 시 안전 대체
+            from collections import deque
+            self.E_hist = deque(maxlen=self.tail_len)
+            self.N_hist = deque(maxlen=self.tail_len)
+            self.U_hist = deque(maxlen=self.tail_len)
+
+        self._last_count = 0
+        # 기준점/좌표계 기준은 유지하고 싶으면 _ref_lla/_ref_ecef 유지
+        # 완전 초기화가 필요하면 아래 두 줄 주석 해제
+        # self._ref_lla = None
+        # self._ref_ecef = None
+
+        # 2) 그려진 객체들 초기화
+        try:
+            self.traj_item.setData(pos=np.zeros((2, 3)))
+        except Exception:
+            pass
+        try:
+            self.head_item.setData(pos=np.array([[0.0, 0.0, 0.0]]))
+        except Exception:
+            pass
+        try:
+            self.vel_item.setData(pos=np.zeros((2, 3)))
+        except Exception:
+            pass
+
+        # 3) 카메라/뷰 리셋 (기본 거리/중심값으로)
+        try:
+            self.view.opts['center'] = self.QVector3D(0.0, 0.0, 0.0)
+            self.view.setCameraPosition(distance=50)
+        except Exception:
+            pass
+
     # QThread 수명주기
     def run(self):
         self.exec_()   # 별도 타이머는 없지만, 일관성 있게 스레드 루프 유지
@@ -432,15 +508,16 @@ class MapViewer_Thread(QThread):
         self.mainwindow = mainwindow
         self.datahub = datahub
 
-        # 1) 이 파일(mainWindow.py)이 있는 디렉터리
-        base_dir = Path(__file__).resolve().parent
+        # 기준 위치(초기 맵 중심). 필요시 프로젝트 현장 좌표로 바꿔줘.
+        self.ref_lat = 37.45162
+        self.ref_lon = 126.65058
+        self.ref_h   = 0.0
 
-        # 2) map.html 파일 경로
+        base_dir = Path(__file__).resolve().parent
         map_path = base_dir / "map.html"
         if not map_path.exists():
             raise FileNotFoundError(f"map.html을 찾을 수 없습니다: {map_path}")
 
-        # 3) HTML 읽어서 사이즈 조정
         html = map_path.read_text(encoding="utf-8")
         new_width  = f"{ws.map_geometry[2]}px"
         new_height = f"{ws.map_geometry[3]}px"
@@ -448,58 +525,70 @@ class MapViewer_Thread(QThread):
         html = html.replace("height: 345px;", f"height: {new_height};")
         map_path.write_text(html, encoding="utf-8")
 
-        # 4) QWebEngineView에 로드
         self.view = QWebEngineView(self.mainwindow.container)
         self.view.setGeometry(*ws.map_geometry)
         self.view.load(QUrl.fromLocalFile(str(map_path)))
         self.view.show()
 
+    def run(self):
+        self.view.loadFinished.connect(self.on_load_finished)
+
     def on_load_finished(self):
-        # Get the QWebEnginePage object
         page = self.view.page()
-        # Inject a JavaScript function to update the marker's location
         self.script = f"""
-        var lat = 37.45162;
-        var lng = 126.65058;
+        var lat = {self.ref_lat};
+        var lng = {self.ref_lon};
         var map = L.map("map").setView([lat,lng], 17);
         L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{{z}}/{{y}}/{{x}}', {{
-            attribution: 'Tiles &copy; Esri &mdash; Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community',
+            attribution: 'Tiles &copy; Esri',
             maxZoom: 18,
         }}).addTo(map);
         var marker = L.marker([lat,lng]).addTo(map);
-        /*
-        trigger is a variable which update a map view according to their location
-        */
         var trigger_javascript = 0;
         function updateMarker(latnew, lngnew, trigger_python) {{
             marker.setLatLng([latnew, lngnew]);
-
             if(trigger_python >= 1 && trigger_javascript == 0) {{
                 map.setView([latnew,lngnew], 15);
                 trigger_javascript = 1;
             }}
         }}
         """
-        
         page.runJavaScript(self.script)
 
-        # Create a QTimer to call the updateMarker function every second
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update_marker)
         self.timer.start(1000)
 
-    def update_marker(self):
-        # Wait for receiving data...
-        if len(self.datahub.latitudes) == 0:
-            return
-        # Call the JavaScript function to update the marker's location
-        lat = self.datahub.latitudes[-1]
-        lng = self.datahub.longitudes[-1]
-        self.view.page().runJavaScript(f"updateMarker({lat}, {lng}, {len(self.datahub.latitudes)})")
+    # --- ENU(m) -> 위경도(deg) 근사 변환 (작은 영역용) ---
+    @staticmethod
+    def _enu_to_latlon(E, N, lat0_deg, lon0_deg):
+        R = 6378137.0  # 지구 장반경 (m)
+        lat0 = np.deg2rad(lat0_deg)
+        dlat = (N / R) * (180.0 / np.pi)
+        dlon = (E / (R * np.cos(lat0))) * (180.0 / np.pi)
+        return lat0_deg + dlat, lon0_deg + dlon
 
-    # Connect the QWebEngineView's loadFinished signal to the on_load_finished slot
-    def run(self):
-        self.view.loadFinished.connect(self.on_load_finished)
+    def update_marker(self):
+        page = self.view.page()
+
+        # 1) 위경도 필드가 있으면 그것부터 사용
+        if hasattr(self.datahub, "latitudes") and hasattr(self.datahub, "longitudes"):
+            if len(self.datahub.latitudes) == 0 or len(self.datahub.longitudes) == 0:
+                return
+            lat = float(self.datahub.latitudes[-1])
+            lng = float(self.datahub.longitudes[-1])
+
+        # 2) 없으면 ENU + 기준 위경도로 변환
+        elif len(self.datahub.Easts) > 0 and len(self.datahub.Norths) > 0:
+            E = float(self.datahub.Easts[-1])
+            N = float(self.datahub.Norths[-1])
+            lat, lng = self._enu_to_latlon(E, N, self.ref_lat, self.ref_lon)
+        else:
+            # 위치 정보가 아직 없음
+            return
+
+        trig = getattr(self.datahub, "trigger_python", 0)
+        page.runJavaScript(f"updateMarker({lat:.8f}, {lng:.8f}, {int(trig)})")
 
 class RocketViewer_Thread(QThread):
     update_signal = pyqtSignal()
@@ -673,8 +762,25 @@ class RocketViewer_Thread(QThread):
         return roll, pitch, yaw
 
     def update_pose(self):
-        if len(self.datahub.speed) == 0:
-            return
+        def _last(arr, default=np.nan):
+            try:
+                return float(arr[-1]) if len(arr) > 0 else float(default)
+            except Exception:
+                return float(default)
+        
+        def _last_speed_scalar(hub):
+            # speed가 있으면 우선
+            if len(hub.speed) > 0:
+                return float(hub.speed[-1])
+            # 없으면 vE/vN/vU로 계산
+            if len(hub.vE) > 0 and len(hub.vN) > 0 and len(hub.vU) > 0:
+                return float(np.sqrt(hub.vE[-1]**2 + hub.vN[-1]**2 + hub.vU[-1]**2))
+            return float('nan')
+
+        def _fmt(val, suffix=""):
+            return f"{val:.2f}{suffix}" if np.isfinite(val) else "N/A"
+            if len(self.datahub.speed) == 0:
+                return
 
         # 오일러 각도에서 쿼터니언을 생성
         quat = self.quaternion_from_euler(self.datahub.rolls[-1], self.datahub.pitchs[-1], self.datahub.yaws[-1])
@@ -688,21 +794,50 @@ class RocketViewer_Thread(QThread):
         self.rocket_mesh.rotate(roll, 0, 1, 0)  # Y축을 기준으로 Roll 적용
         self.rocket_mesh.rotate(yaw, 0, 0, 1)  # Z축을 기준으로 Yaw 적용
 
-
-
-
         # 데이터에 따라 UI 레이블 업데이트
-        self.speed_label.setText(f'Speed {self.datahub.speed[-1]:.2f}m/s')
-        self.altitude_label.setText(f'Altitude {self.datahub.altitude[-1]:.2f}m')
-        self.roll_label.setText(f'Roll : {roll:.2f}°')
-        self.pitch_label.setText(f'Pitch : {pitch:.2f}°')
-        self.yaw_label.setText(f'Yaw : {yaw:.2f}°')
-        self.rollspeed_label.setText(f'Roll_speed : {self.datahub.rollSpeeds[-1]:.2f}°/s')
-        self.pitchspeed_label.setText(f'Pitch_speed : {self.datahub.pitchSpeeds[-1]:.2f}°/s')
-        self.yawspeed_label.setText(f'Yaw_speed : {self.datahub.yawSpeeds[-1]:.2f}°/s')
-        self.xacc_label.setText(f'X_acc : {self.datahub.Xaccels[-1]:.2f}g')
-        self.yacc_label.setText(f'Y_acc : {self.datahub.Yaccels[-1]:.2f}g')
-        self.zacc_label.setText(f'Z_acc : {self.datahub.Zaccels[-1]:.2f}g')
+        spd = _last_speed_scalar(self.datahub)
+        self.speed_label.setText(f"Speed {_fmt(spd,'m/s')}")
+
+        # 고도: Datahub에는 altitude 대신 Ups 사용
+        alt = _last(self.datahub.Ups)   # <-- 핵심 수정
+        self.altitude_label.setText(f"Altitude {_fmt(alt,'m')}")
+
+        # 오일러 각: roll/pitch/yaw 변수는 이미 위에서 계산된 값 사용
+        self.roll_label.setText(f"Roll : {_fmt(roll,'°')}")
+        self.pitch_label.setText(f"Pitch : {_fmt(pitch,'°')}")
+        self.yaw_label.setText(f"Yaw : {_fmt(yaw,'°')}")
+
+        # 각속도
+        self.rollspeed_label.setText(f"Roll_speed : {_fmt(_last(self.datahub.rollSpeeds),'Rad/s')}")
+        self.pitchspeed_label.setText(f"Pitch_speed : {_fmt(_last(self.datahub.pitchSpeeds),'Rad/s')}")
+        self.yawspeed_label.setText(f"Yaw_speed : {_fmt(_last(self.datahub.yawSpeeds),'Rad/s')}")
+
+        # 가속도 (CSV의 a_p/a_y/a_r가 g 단위라면 레이블 그대로, m/s^2면 단위 바꾸세요)
+        self.xacc_label.setText(f"X_acc : {_fmt(_last(self.datahub.Xaccels),'m/s²')}")
+        self.yacc_label.setText(f"Y_acc : {_fmt(_last(self.datahub.Yaccels),'m/s²')}")
+        self.zacc_label.setText(f"Z_acc : {_fmt(_last(self.datahub.Zaccels),'m/s²')}")
+
+    def data_label_clear(self):
+        """모든 데이터 레이블을 초기 상태로 리셋"""
+        # 속도/고도
+        self.speed_label.setText("Speed 0.00 m/s")
+        self.altitude_label.setText("Altitude 0.00 m")
+
+        # 오일러 각
+        self.roll_label.setText("Roll : 0.00°")
+        self.pitch_label.setText("Pitch : 0.00°")
+        self.yaw_label.setText("Yaw : 0.00°")
+
+        # 각속도
+        self.rollspeed_label.setText("Roll_speed : 0.00 Rad/s")
+        self.pitchspeed_label.setText("Pitch_speed : 0.00 Rad/s")
+        self.yawspeed_label.setText("Yaw_speed : 0.00 Rad/s")
+
+        # 가속도
+        self.xacc_label.setText("X_acc : 0.00 m/s²")
+        self.yacc_label.setText("Y_acc : 0.00 m/s²")
+        self.zacc_label.setText("Z_acc : 0.00 m/s²")
+
 
     def run(self):
         self.exec_()  # QThread에서 이벤트 루프를 실행
@@ -737,6 +872,9 @@ class MainWindow(PageWindow):
         self.rocketviewer.start()
 
         self.resetcheck = 0
+
+        self.csv_player = None
+        self.replay_csv_path = None  # 사용자가 고를 CSV 경로
         
     def initUI(self):
 
@@ -1071,36 +1209,81 @@ class MainWindow(PageWindow):
         
             file_dir = dirname(self.dir_path)
             file_path = join(file_dir,FileName)+".csv"
-            if exists(file_path):
-                msg_box = QMessageBox(self)
-                msg_box.setStyleSheet("QMessageBox {background-color: white;}")
-                msg_box.information(self,"information","Same file already exist")
-            else:
-                if ok:
-                    self.datahub.mySerialPort=self.rf_port_edit.text()
-                    self.datahub.myBaudrate = self.baudrate_edit.text()
-                    self.datahub.file_Name = FileName+'.csv'
-                    self.datahub.communication_start()
+            port_text = self.rf_port_edit.text().strip().upper()
+            if port_text == "CSV":
+                # 파일 선택 (로그 폴더 기본, 없다면 현재 폴더)
+                start_dir = os.path.join(dirname(self.dir_path), "log")
+                if not os.path.isdir(start_dir):
+                    start_dir = dirname(self.dir_path)
 
-                    print( "changed" )
-                    
+                csv_path, _ = QFileDialog.getOpenFileName(
+                    self, "Select CSV to Replay", start_dir, "CSV Files (*.csv);;All Files (*)"
+                )
+                if not csv_path:
+                    return  # 사용자 취소
+
+                self.replay_csv_path = csv_path
+                # 통신 시작 플래그 등 UI 상태 업데이트만 동일하게
+                self.datahub.communication_start()
+                self.datahub.datasaver_start()
+                self.now_status.setText(ws.start_status)
+                self.start_button.setEnabled(False)
+                self.stop_button.setEnabled(True)
+                self.rf_port_edit.setEnabled(False)
+                self.baudrate_edit.setEnabled(False)
+                self.shadow_start_button.setOffset(0)
+                self.shadow_stop_button.setOffset(6)
+                self.shadow_reset_button.setOffset(6)
+
+                # CSVPlayer 시작 & 그래프 업데이트 연결
+                try:
+                    self.csv_player = CSVPlayer(self.replay_csv_path, self.datahub, hz=5.0, parent=self)
+                    # 새 샘플 마다 2D 그래프 즉시 갱신 (3D/맵은 자체 타이머로 갱신)
+                    self.csv_player.sampleReady.connect(self.graphviewer.update_data)
+                    self.csv_player.start()
+                except Exception as e:
+                    print(f"[CSVPlayer] start error: {e}")
+                    QMessageBox.warning(self, "warning", "CSV 재생 시작 실패")
+                    # UI 복구
+                    self.datahub.communication_stop()
+                    self.datahub.datasaver_stop()
+                    self.start_button.setEnabled(True)
+                    self.stop_button.setEnabled(False)
+                    self.rf_port_edit.setEnabled(True)
+                    self.baudrate_edit.setEnabled(True)
+                return  # CSV 모드 처리는 여기서 종료
+            
+            else:
+                if exists(file_path):
+                    msg_box = QMessageBox(self)
+                    msg_box.setStyleSheet("QMessageBox {background-color: white;}")
+                    msg_box.information(self,"information","Same file already exist")
+                else:
+                    if ok:
+                        self.datahub.mySerialPort=self.rf_port_edit.text()
+                        self.datahub.myBaudrate = self.baudrate_edit.text()
+                        self.datahub.file_Name = FileName+'.csv'
+                        self.datahub.communication_start()
+
+                        print( "changed" )
+                        
+                        self.datahub.serial_port_error=-1
+                        if self.datahub.check_communication_error():
+                            warning_msg_box = QMessageBox(self)
+                            warning_msg_box.setStyleSheet("QMessageBox {background-color: white;}")
+                            warning_msg_box.warning(self,"warning","Check the Port or Baudrate again.")
+                            self.datahub.communication_stop()
+                        else:
+                            self.datahub.datasaver_start()
+                            self.now_status.setText(ws.start_status)
+                            self.start_button.setEnabled(False)
+                            self.stop_button.setEnabled(True)
+                            self.rf_port_edit.setEnabled(False)
+                            self.baudrate_edit.setEnabled(False)
+                            self.shadow_start_button.setOffset(0)
+                            self.shadow_stop_button.setOffset(6)
+                            self.shadow_reset_button.setOffset(6)
                     self.datahub.serial_port_error=-1
-                    if self.datahub.check_communication_error():
-                        warning_msg_box = QMessageBox(self)
-                        warning_msg_box.setStyleSheet("QMessageBox {background-color: white;}")
-                        warning_msg_box.warning(self,"warning","Check the Port or Baudrate again.")
-                        self.datahub.communication_stop()
-                    else:
-                        self.datahub.datasaver_start()
-                        self.now_status.setText(ws.start_status)
-                        self.start_button.setEnabled(False)
-                        self.stop_button.setEnabled(True)
-                        self.rf_port_edit.setEnabled(False)
-                        self.baudrate_edit.setEnabled(False)
-                        self.shadow_start_button.setOffset(0)
-                        self.shadow_stop_button.setOffset(6)
-                        self.shadow_reset_button.setOffset(6)
-                self.datahub.serial_port_error=-1
         else:
             self.datahub.communication_start()
             self.datahub.serial_port_error=-1
@@ -1117,6 +1300,15 @@ class MainWindow(PageWindow):
 
     # Run when stop button is clicked
     def stop_button_clicked(self):
+        # CSV 모드라면 재생 중지
+        if self.csv_player is not None:
+            try:
+                self.csv_player.stop()
+                self.csv_player.wait(1000)
+            except Exception:
+                pass
+            self.csv_player = None
+
         self.datahub.communication_stop()
         self.now_status.setText(ws.stop_status)
         self.now_status.setStyleSheet("color:#00FF00;")
@@ -1132,6 +1324,15 @@ class MainWindow(PageWindow):
     def reset_button_clicked(self):
         request = QMessageBox.question(self,'Message', 'Are you sure to reset?')
         if request == QMessageBox.Yes:
+            # CSV 모드라면 재생 중지
+            if self.csv_player is not None:
+                try:
+                    self.csv_player.stop()
+                    self.csv_player.wait(1000)
+                except Exception:
+                    pass
+            self.csv_player = None
+
             msg_box = QMessageBox(self)
             msg_box.setStyleSheet("QMessageBox {background-color: white;}")
             msg_box.information(self,"information","Program Reset")
@@ -1147,6 +1348,8 @@ class MainWindow(PageWindow):
             self.shadow_stop_button.setOffset(0)
             self.shadow_reset_button.setOffset(0)
             self.graphviewer.graph_clear()
+            self.enuviewer.trajectory_clear()
+            self.rocketviewer.data_label_clear()
             self.datahub.clear()
             self.resetcheck = 0
         else:
@@ -1220,6 +1423,52 @@ class MainWindow(PageWindow):
         }
         for seq, btn in button_by_seq.items():
             btn.setToolTip((btn.toolTip() + " | " if btn.toolTip() else "") + f"Shortcut: {seq}")
+
+
+class CSVPlayer(QThread):
+    sampleReady = pyqtSignal()
+
+    def __init__(self, csv_path, datahub, hz=5.0, parent=None):
+        super().__init__(parent)
+        self.csv_path = csv_path
+        self.datahub = datahub
+        self.hz = float(hz)
+        self._running = True
+        self._paused = False
+
+    def stop(self):
+        self._running = False
+
+    def pause(self, yes=True):
+        self._paused = yes
+
+    def run(self):
+        df = pd.read_csv(self.csv_path, header=None, names=COLUMN_NAMES)
+        dt = 1.0 / max(1e-6, self.hz)
+        next_t = time.perf_counter()
+
+        for _, row in df.iterrows():
+            if not self._running:
+                break
+
+            # pause
+            while self._paused and self._running:
+                time.sleep(0.05)
+
+            # push one sample
+            self.datahub.update_from_row(row.values.tolist())
+
+            # tell UI “new sample”
+            self.sampleReady.emit()
+
+            # pacing ~ 5 Hz
+            next_t += dt
+            sleep_for = next_t - time.perf_counter()
+            if sleep_for > 0:
+                time.sleep(sleep_for)
+            else:
+                # if lagging, reset target to now
+                next_t = time.perf_counter()
 
 
 class TimeAxisItem(AxisItem):

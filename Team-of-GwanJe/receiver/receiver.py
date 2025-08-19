@@ -6,7 +6,7 @@ import numpy as np
 
 
 # 패킷: 'A','B', len, hours, mins, secs, tenmilis,
-#       E, N, U, v_E, v_N, v_U, a_p, a_y, a_r, w_p, w_y, w_r, q_0, q_1, q_2, q_3,
+#       E, N, U, v_E, v_N, v_U, a_p, a_y, a_r, q_0, q_1, q_2, q_3, w_p, w_y, w_r,
 #       checksum, 'Z'
 
 ##'A', 'B', len, order, checksum, 'Z' 

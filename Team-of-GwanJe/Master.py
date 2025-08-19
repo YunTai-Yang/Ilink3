@@ -55,6 +55,8 @@ class Master:
 if __name__ == "__main__":
     master = Master()
 
+    master.mainWindow.showMaximized()
+
     master.run()
     
     input()
