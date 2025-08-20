@@ -30,6 +30,8 @@ from datetime import timedelta
 from os.path import abspath, dirname, join, exists
 from sys import exit, argv
 
+from datahub import Datahub
+
 from pandas import read_csv
 
 from . import widgetStyle as ws
@@ -258,6 +260,7 @@ class RealTimeENUPlot(QThread):
         self._last_count = 0
         self._ref_lla = None
         self._ref_ecef = None
+        self._input_mode = "auto"  # "auto" | "enu" | "ecef"
 
         # 뷰/아이템 (UI 스레드에서 생성)
         self.trajectory_title = QLabel(self.mainwindow.container)
@@ -287,6 +290,14 @@ class RealTimeENUPlot(QThread):
         self.timer.timeout.connect(self._update_plot)
         self.timer.start(update_ms)
 
+        self.keep_all = True          # 전체 궤적 유지 (False면 기존 tail만 그림)
+        self.max_draw_pts = 20000     # 그릴 때 최대 포인트 수 (성능 보호용)
+
+        # 전체 궤적 누적 리스트
+        self.E_all = []
+        self.N_all = []
+        self.U_all = []
+
     # ---------- 좌표 변환 ----------
     @staticmethod
     def _lla_to_ecef(lat_deg, lon_deg, h_m):
@@ -304,26 +315,101 @@ class RealTimeENUPlot(QThread):
         sl, cl = np.sin(lat), np.cos(lat)
         so, co = np.sin(lon), np.cos(lon)
         dx, dy, dz = xyz - ref_ecef
-        T = np.array([[-so,          co,           0],
+        T = np.array([[-so,          co,         0],
                       [-sl*co,   -sl*so,        cl],
                       [ cl*co,    cl*so,        sl]])
         return T @ np.array([dx, dy, dz])
+    
+    @staticmethod
+    def _ecef_to_lla(x, y, z):
+        a = 6378137.0
+        f = 1/298.257223563
+        e2 = f*(2-f)
+        b = a*(1-f)
+        ep2 = (a*a - b*b) / (b*b)
+
+        r = np.hypot(x, y)
+        if r < 1e-9:
+            # Pole
+            lat = np.sign(z) * np.pi/2
+            lon = 0.0
+            h = abs(z) - b
+            return np.rad2deg(lat), np.rad2deg(lon), h
+
+        lon = np.arctan2(y, x)
+
+        # Initial parametric latitude
+        theta = np.arctan2(z * a, r * b)
+        st, ct = np.sin(theta), np.cos(theta)
+
+        lat = np.arctan2(z + ep2 * b * st*st*st,
+                         r - e2 * a * ct*ct*ct)
+
+        sl, cl = np.sin(lat), np.cos(lat)
+        N = a / np.sqrt(1 - e2 * sl*sl)
+        h = r/np.cos(lat) - N
+
+        # One Bowring correction (usually enough)
+        lat_prev = lat
+        N = a / np.sqrt(1 - e2 * np.sin(lat_prev)**2)
+        h = r/np.cos(lat_prev) - N
+        lat = np.arctan2(z, r*(1 - e2*N/(N+h)))
+
+        return float(np.rad2deg(lat)), float(np.rad2deg(lon)), float(h)
+    @staticmethod
+    def _ecef_vec_to_enu(vec_xyz, ref_lat_deg, ref_lon_deg):
+        lat = np.deg2rad(ref_lat_deg); lon = np.deg2rad(ref_lon_deg)
+        sl, cl = np.sin(lat), np.cos(lat)
+        so, co = np.sin(lon), np.cos(lon)
+        T = np.array([[-so,        co,       0],
+                    [-sl*co,  -sl*so,     cl],
+                    [ cl*co,   cl*so,     sl]])
+        return T @ np.asarray(vec_xyz, dtype=float)
+    
+    def _has_hub_enu(self):
+        return (hasattr(self.datahub, 'e_enu') and hasattr(self.datahub, 'n_enu') and hasattr(self.datahub, 'u_enu')
+                and len(self.datahub.e_enu) > 0 and len(self.datahub.n_enu) > 0 and len(self.datahub.u_enu) > 0)
+
+    def _has_hub_enu_vel(self):
+        return (hasattr(self.datahub, 'vE_enu') and hasattr(self.datahub, 'vN_enu') and hasattr(self.datahub, 'vU_enu')
+                and len(self.datahub.vE_enu) > 0 and len(self.datahub.vN_enu) > 0 and len(self.datahub.vU_enu) > 0)
 
     def _ensure_ref_from_datahub(self):
-        if self._ref_lla is not None:
+        if self._ref_lla is not None and self._ref_ecef is not None:
             return
-        if hasattr(self.datahub, 'latitudes') and hasattr(self.datahub, 'longitudes') and len(self.datahub.latitudes) > 0:
-            lat0 = float(self.datahub.latitudes[0]); lon0 = float(self.datahub.longitudes[0])
-            h0 = float(self.datahub.altitude[0]) if hasattr(self.datahub, 'altitude') and len(self.datahub.altitude) > 0 else 0.0
-            self._ref_lla = (lat0, lon0, h0)
-            self._ref_ecef = self._lla_to_ecef(lat0, lon0, h0)
 
+        if all(hasattr(self.datahub, n) for n in ('Easts','Norths','Ups')) and len(self.datahub.Easts) > 0:
+            x0 = float(self.datahub.Easts[0]); y0 = float(self.datahub.Norths[0]); z0 = float(self.datahub.Ups[0])
+            lat0, lon0, h0 = self._ecef_to_lla(x0, y0, z0)
+            self._ref_lla = (lat0, lon0, h0)
+            self._ref_ecef = np.array([x0, y0, z0], dtype=float)
+            return
+
+        self._ref_lla = None
+        self._ref_ecef = None
+    
+    def _detect_input_mode(self):
+        # 1순위: Datahub가 ENU를 이미 제공
+        if self._has_hub_enu():
+            return "hub_enu"
+
+        # 2순위: Easts/Norths/Ups 가 ENU인지/ECEF인지 추정
+        if not all(hasattr(self.datahub, n) for n in ('Easts','Norths','Ups')) or len(self.datahub.Easts) == 0:
+            return "unknown"
+        try:
+            x = float(self.datahub.Easts[0]); y = float(self.datahub.Norths[0]); z = float(self.datahub.Ups[0])
+            norm = np.sqrt(x*x + y*y + z*z)
+            return "ecef" if norm > 1.0e6 else "enu"
+        except Exception:
+            return "unknown"
+        
     def _available_count(self):
+        # hub ENU가 있으면 그 길이에 맞춘다
+        if self._has_hub_enu():
+            return min(len(self.datahub.e_enu), len(self.datahub.n_enu), len(self.datahub.u_enu))
+        # 없으면 기존 Easts/Norths/Ups
         if all(hasattr(self.datahub, n) for n in ('Easts','Norths','Ups')):
             return min(len(self.datahub.Easts), len(self.datahub.Norths), len(self.datahub.Ups))
-        if hasattr(self.datahub,'latitudes') and hasattr(self.datahub,'longitudes'):
-            return min(len(self.datahub.latitudes), len(self.datahub.longitudes),
-                       len(self.datahub.altitude) if hasattr(self.datahub,'altitude') else 10**9)
         return 0
 
     def _get_dt(self, idx):
@@ -337,17 +423,23 @@ class RealTimeENUPlot(QThread):
             return None
 
     def _get_velocity_sample(self, idx, fallback_from_pos=None):
-        if all(hasattr(self.datahub, n) for n in ('vE','vN','vU')):
-            try: return float(self.datahub.vE[idx]), float(self.datahub.vN[idx]), float(self.datahub.vU[idx])
-            except Exception: pass
-        if all(hasattr(self.datahub, n) for n in ('xspeed','yspeed','zspeed')):
-            try: return float(self.datahub.xspeed[idx]), float(self.datahub.yspeed[idx]), float(self.datahub.zspeed[idx])
-            except Exception: pass
+        # 1) hub ENU 속도 있으면 그대로 사용
+        if self._has_hub_enu_vel():
+            try:
+                return (float(self.datahub.vE_enu[idx]),
+                        float(self.datahub.vN_enu[idx]),
+                        float(self.datahub.vU_enu[idx]))
+            except Exception:
+                pass
+
+        # 2) 포지션 ENU로부터 미분
         if fallback_from_pos is not None and idx >= 1:
             (E, N, U) = fallback_from_pos[idx]; (E0, N0, U0) = fallback_from_pos[idx-1]
             dt = self._get_dt(idx)
             if dt and dt > 1e-6:
                 return ((E-E0)/dt, (N-N0)/dt, (U-U0)/dt)
+
+        # 3) 최후: 0
         return (0.0, 0.0, 0.0)
 
     def _pull_new_samples(self):
@@ -355,34 +447,72 @@ class RealTimeENUPlot(QThread):
         if total <= self._last_count:
             return None
 
+        # 모드 결정
+        if self._input_mode == "auto":
+            self._input_mode = self._detect_input_mode()
+
         idxs = range(self._last_count, total)
-        have_ENU = all(hasattr(self.datahub, n) for n in ('Easts','Norths','Ups'))
-        ENU = []
+        self.ENU = []
 
-        if have_ENU:
+        # A) Datahub가 ENU 제공 (권장 경로)
+        if self._input_mode == "hub_enu":
             for i in idxs:
-                ENU.append((float(self.datahub.Easts[i]),
-                            float(self.datahub.Norths[i]),
-                            float(self.datahub.Ups[i])))
-        else:
+                self.ENU.append((float(self.datahub.e_enu[i]),
+                                float(self.datahub.n_enu[i]),
+                                float(self.datahub.u_enu[i])))
+
+        # B) 사용자가 ENU 직접 공급 (레거시)
+        elif self._input_mode == "enu":
+            for i in idxs:
+                self.ENU.append((float(self.datahub.Easts[i]),
+                                float(self.datahub.Norths[i]),
+                                float(self.datahub.Ups[i])))
+
+        # C) ECEF → ENU 변환 (폴백)
+        elif self._input_mode == "ecef":
             self._ensure_ref_from_datahub()
-            if self._ref_lla is None:
+            if self._ref_lla is None or self._ref_ecef is None:
                 return None
-            lat0, lon0, h0 = self._ref_lla
+            lat0, lon0, _ = self._ref_lla
             for i in idxs:
-                lat = float(self.datahub.latitudes[i]); lon = float(self.datahub.longitudes[i])
-                h = float(self.datahub.altitude[i]) if hasattr(self.datahub,'altitude') else 0.0
-                ecef = self._lla_to_ecef(lat, lon, h)
-                E, N, U = self._ecef_to_enu(ecef, self._ref_ecef, lat0, lon0)
-                ENU.append((E, N, U))
+                x = float(self.datahub.Easts[i]); y = float(self.datahub.Norths[i]); z = float(self.datahub.Ups[i])
+                e, n, u = self._ecef_to_enu(np.array([x, y, z], float), self._ref_ecef, lat0, lon0)
+                self.ENU.append((e, n, u))
+        else:
+            return None
 
-        for E,N,U in ENU:
+        # 버퍼 적재 (tail & all)
+        for E, N, U in self.ENU:
             self.E_hist.append(E); self.N_hist.append(N); self.U_hist.append(U)
+            if self.keep_all:
+                self.E_all.append(E); self.N_all.append(N); self.U_all.append(U)
 
+        # 속도
         last_idx = total - 1
-        vE, vN, vU = self._get_velocity_sample(last_idx, fallback_from_pos=ENU if have_ENU else None)
+        vE, vN, vU = self._get_velocity_sample(last_idx, fallback_from_pos=self.ENU)
+
         self._last_count = total
         return (vE, vN, vU)
+    
+    def _prepare_pos(self):
+        if self.keep_all and len(self.E_all) >= 2:
+            e = np.asarray(self.E_all, dtype=float)
+            n = np.asarray(self.N_all, dtype=float)
+            u = np.asarray(self.U_all, dtype=float)
+        else:
+            if len(self.E_hist) < 2:
+                return None
+            e = np.asarray(self.E_hist, dtype=float)
+            n = np.asarray(self.N_hist, dtype=float)
+            u = np.asarray(self.U_hist, dtype=float)
+
+        L = e.shape[0]
+        if L > self.max_draw_pts:
+            step = int(np.ceil(L / self.max_draw_pts))
+            idx = slice(0, L, step)
+            e, n, u = e[idx], n[idx], u[idx]
+
+        return np.column_stack([e, n, u])
 
     def _add_axes(self):
         x_axis = gl.GLLinePlotItem(pos=np.array([[0,0,0],[10,0,0]]), color=(1,0,0,1), width=2, antialias=True)
@@ -399,12 +529,28 @@ class RealTimeENUPlot(QThread):
         self.view.opts['center'] = self.QVector3D(float(e_mid), float(n_mid), float(u_mid))
         self.view.setCameraPosition(distance=dist)
 
+    def _autoscale_camera_with(self, pos):
+        if pos is None or len(pos) < 2:
+            return
+        e, n, u = pos[:,0], pos[:,1], pos[:,2]
+        e_mid = (e.min()+e.max())/2.0
+        n_mid = (n.min()+n.max())/2.0
+        u_mid = (u.min()+u.max())/2.0
+        max_range = max(e.max()-e.min(), n.max()-n.min(), u.max()-u.min())
+        dist = max(20.0, max_range*1.5)
+        self.view.opts['center'] = self.QVector3D(float(e_mid), float(n_mid), float(u_mid))
+        self.view.setCameraPosition(distance=dist)
+
     def _update_plot(self):
         out = self._pull_new_samples()
-        if out is None: return
+        if out is None:
+            return
         vE, vN, vU = out
 
-        pos = np.column_stack([np.array(self.E_hist), np.array(self.N_hist), np.array(self.U_hist)])
+        pos = self._prepare_pos()
+        if pos is None:
+            return
+
         if len(pos) >= 2:
             self.traj_item.setData(pos=pos)
 
@@ -414,10 +560,10 @@ class RealTimeENUPlot(QThread):
         vel_end = head[0] + np.array([vE, vN, vU]) * self.vel_scale
         self.vel_item.setData(pos=np.vstack([head[0], vel_end]))
 
-        self._autoscale_camera()
+        # 변경: pos 기반 오토스케일
+        self._autoscale_camera_with(pos)
 
     def _add_legend(self):
-        """GLViewWidget 위에 ENU(R,G,B) 범례를 반투명 오버레이로 표시."""
         # GLViewWidget 위치 기준으로 좌상단에 작게 띄우기
         vx, vy, vw, vh = ws.pw_trajectory_geometry  # (x, y, w, h)
         pad = 10
@@ -451,44 +597,34 @@ class RealTimeENUPlot(QThread):
         add_row(56, (  0,   0, 255), "U (Up)    — Blue")
 
     def trajectory_clear(self):
-        # 1) 내부 버퍼/카운터 초기화
+        # tail deque만 비우고, last_count 초기화 (다음 프레임부터 새로 들어온 것만 tail에 채움)
         try:
-            self.E_hist.clear()
-            self.N_hist.clear()
-            self.U_hist.clear()
+            self.E_hist.clear(); self.N_hist.clear(); self.U_hist.clear()
         except Exception:
-            # deque가 아니거나 초기화 실패 시 안전 대체
             from collections import deque
             self.E_hist = deque(maxlen=self.tail_len)
             self.N_hist = deque(maxlen=self.tail_len)
             self.U_hist = deque(maxlen=self.tail_len)
 
         self._last_count = 0
-        # 기준점/좌표계 기준은 유지하고 싶으면 _ref_lla/_ref_ecef 유지
-        # 완전 초기화가 필요하면 아래 두 줄 주석 해제
-        # self._ref_lla = None
-        # self._ref_ecef = None
-
-        # 2) 그려진 객체들 초기화
-        try:
-            self.traj_item.setData(pos=np.zeros((2, 3)))
-        except Exception:
-            pass
-        try:
-            self.head_item.setData(pos=np.array([[0.0, 0.0, 0.0]]))
-        except Exception:
-            pass
-        try:
-            self.vel_item.setData(pos=np.zeros((2, 3)))
-        except Exception:
-            pass
-
-        # 3) 카메라/뷰 리셋 (기본 거리/중심값으로)
+        # 보기 객체 초기화
+        try: self.traj_item.setData(pos=np.zeros((2, 3)))
+        except: pass
+        try: self.head_item.setData(pos=np.array([[0.0, 0.0, 0.0]]))
+        except: pass
+        try: self.vel_item.setData(pos=np.zeros((2, 3)))
+        except: pass
+        # 카메라 리셋은 유지/선택
         try:
             self.view.opts['center'] = self.QVector3D(0.0, 0.0, 0.0)
             self.view.setCameraPosition(distance=50)
-        except Exception:
-            pass
+        except: pass
+
+    def trajectory_hard_reset(self):
+        self.trajectory_clear()
+        self.E_all.clear(); self.N_all.clear(); self.U_all.clear()
+        self._ref_lla = None; self._ref_ecef = None
+        self._input_mode = "auto"
 
     # QThread 수명주기
     def run(self):
@@ -603,6 +739,9 @@ class RocketViewer_Thread(QThread):
         self.x = np.random.rand(1)
         self.y = np.random.rand(1)
         self.circle_point = np.zeros((3, 5))
+        self._ref_lla = None
+        self._ref_ecef = None
+        self.altitude_mode = "enu"  # "enu" = 기준점 대비 상대고도(U), "msl" = 절대고도(LLA h)
         self.setup_ui()
 
     def setup_ui(self):
@@ -726,96 +865,61 @@ class RocketViewer_Thread(QThread):
                     faces.append(face)
         return np.array(vertices), np.array(faces)
 
-    def quaternion_from_euler(self, roll, pitch, yaw):
-        # Roll (X축 회전), Pitch (Y축 회전), Yaw (Z축 회전)
-        roll = deg2rad(roll) / 2
-        pitch = deg2rad(pitch) / 2
-        yaw = deg2rad(yaw) / 2
-
-        cy = cos(yaw)
-        sy = sin(yaw)
-        cp = cos(pitch)
-        sp = sin(pitch)
-        cr = cos(roll)
-        sr = sin(roll)
-
-        qw = cr * cp * cy + sr * sp * sy
-        qx = sr * cp * cy - cr * sp * sy
-        qy = cr * sp * cy + sr * cp * sy
-        qz = cr * cp * sy - sr * sp * cy
-
-        return array([qw, qx, qy, qz])
-
-    def euler_from_quaternion(self, quat):
-        qw, qx, qy, qz = quat
-
-        # 오일러 각도를 계산
-        roll = np.arctan2(2.0 * (qw * qx + qy * qz), 1.0 - 2.0 * (qx * qx + qy * qy))
-        pitch = np.arcsin(2.0 * (qw * qy - qz * qx))
-        yaw = np.arctan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz))
-
-        # 라디안을 도로 변환
-        roll = np.degrees(roll)
-        pitch = np.degrees(pitch)
-        yaw = np.degrees(yaw)
-
-        return roll, pitch, yaw
-
     def update_pose(self):
         def _last(arr, default=np.nan):
             try:
                 return float(arr[-1]) if len(arr) > 0 else float(default)
             except Exception:
                 return float(default)
-        
-        def _last_speed_scalar(hub):
-            # speed가 있으면 우선
-            if len(hub.speed) > 0:
-                return float(hub.speed[-1])
-            # 없으면 vE/vN/vU로 계산
-            if len(hub.vE) > 0 and len(hub.vN) > 0 and len(hub.vU) > 0:
-                return float(np.sqrt(hub.vE[-1]**2 + hub.vN[-1]**2 + hub.vU[-1]**2))
-            return float('nan')
 
         def _fmt(val, suffix=""):
             return f"{val:.2f}{suffix}" if np.isfinite(val) else "N/A"
-            if len(self.datahub.speed) == 0:
-                return
 
-        # 오일러 각도에서 쿼터니언을 생성
-        quat = self.quaternion_from_euler(self.datahub.rolls[-1], self.datahub.pitchs[-1], self.datahub.yaws[-1])
+        # 1) 오리엔테이션: Datahub가 이미 ENU 기준 Z–X–Y(roll=z, pitch=x, yaw=y)로 계산해둠
+        roll_z  = _last(self.datahub.rolls)   # deg
+        pitch_x = _last(self.datahub.pitchs)  # deg
+        yaw_y   = _last(self.datahub.yaws)    # deg
 
-        # 로켓의 변환 초기화
         self.rocket_mesh.resetTransform()
+        # 적용 순서/축: Z(roll) → X(pitch) → Y(yaw)
+        self.rocket_mesh.rotate(roll_z,  0, 0, 1)  # roll about Z
+        self.rocket_mesh.rotate(pitch_x, 1, 0, 0)  # pitch about X
+        self.rocket_mesh.rotate(yaw_y,   0, 1, 0)  # yaw about Y
 
-        # 쿼터니언에서 직접 회전 적용
-        roll, pitch, yaw = self.euler_from_quaternion(quat)
-        self.rocket_mesh.rotate(pitch, 1, 0, 0)  # X축을 기준으로 Pitch 적용
-        self.rocket_mesh.rotate(roll, 0, 1, 0)  # Y축을 기준으로 Roll 적용
-        self.rocket_mesh.rotate(yaw, 0, 0, 1)  # Z축을 기준으로 Yaw 적용
+        # 2) 속도: 있으면 v*_enu 사용(크기는 좌표계와 무관하지만 일관성 위해 ENU 우선)
+        if hasattr(self.datahub, 'vE_enu') and len(self.datahub.vE_enu) > 0:
+            vE = _last(self.datahub.vE_enu)
+            vN = _last(self.datahub.vN_enu)
+            vU = _last(self.datahub.vU_enu)
+            spd = (vE**2 + vN**2 + vU**2) ** 0.5
+        elif len(self.datahub.speed) > 0:
+            spd = _last(self.datahub.speed)
+        else:
+            # ECEF 속도로 대체
+            vE = _last(self.datahub.vE)
+            vN = _last(self.datahub.vN)
+            vU = _last(self.datahub.vU)
+            spd = (vE**2 + vN**2 + vU**2) ** 0.5
 
-        # 데이터에 따라 UI 레이블 업데이트
-        spd = _last_speed_scalar(self.datahub)
         self.speed_label.setText(f"Speed {_fmt(spd,'m/s')}")
 
-        # 고도: Datahub에는 altitude 대신 Ups 사용
-        alt = _last(self.datahub.Ups)   # <-- 핵심 수정
+        alt = _last(self.datahub.vU_enu)
         self.altitude_label.setText(f"Altitude {_fmt(alt,'m')}")
 
-        # 오일러 각: roll/pitch/yaw 변수는 이미 위에서 계산된 값 사용
-        self.roll_label.setText(f"Roll : {_fmt(roll,'°')}")
-        self.pitch_label.setText(f"Pitch : {_fmt(pitch,'°')}")
-        self.yaw_label.setText(f"Yaw : {_fmt(yaw,'°')}")
+        # 4) 각도 레이블(이미 deg): Datahub 계산값 그대로 사용
+        self.roll_label.setText(f"Roll : {_fmt(roll_z,'°')}")
+        self.pitch_label.setText(f"Pitch : {_fmt(pitch_x,'°')}")
+        self.yaw_label.setText(f"Yaw : {_fmt(yaw_y,'°')}")
 
-        # 각속도
+        # 5) 각속도/가속도
         self.rollspeed_label.setText(f"Roll_speed : {_fmt(_last(self.datahub.rollSpeeds),'Rad/s')}")
         self.pitchspeed_label.setText(f"Pitch_speed : {_fmt(_last(self.datahub.pitchSpeeds),'Rad/s')}")
         self.yawspeed_label.setText(f"Yaw_speed : {_fmt(_last(self.datahub.yawSpeeds),'Rad/s')}")
 
-        # 가속도 (CSV의 a_p/a_y/a_r가 g 단위라면 레이블 그대로, m/s^2면 단위 바꾸세요)
         self.xacc_label.setText(f"X_acc : {_fmt(_last(self.datahub.Xaccels),'m/s²')}")
         self.yacc_label.setText(f"Y_acc : {_fmt(_last(self.datahub.Yaccels),'m/s²')}")
         self.zacc_label.setText(f"Z_acc : {_fmt(_last(self.datahub.Zaccels),'m/s²')}")
+
 
     def data_label_clear(self):
         """모든 데이터 레이블을 초기 상태로 리셋"""
@@ -1424,7 +1528,6 @@ class MainWindow(PageWindow):
         for seq, btn in button_by_seq.items():
             btn.setToolTip((btn.toolTip() + " | " if btn.toolTip() else "") + f"Shortcut: {seq}")
 
-
 class CSVPlayer(QThread):
     sampleReady = pyqtSignal()
 
@@ -1469,7 +1572,6 @@ class CSVPlayer(QThread):
             else:
                 # if lagging, reset target to now
                 next_t = time.perf_counter()
-
 
 class TimeAxisItem(AxisItem):
     def __init__(self, *args, **kwargs):
