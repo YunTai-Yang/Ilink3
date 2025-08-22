@@ -1249,30 +1249,38 @@ class MainWindow(PageWindow):
             )
     
     def on_toggle(self, btn, checked: bool):
-        """토글 상태 변경 시 라벨/스타일 갱신 + (선택) 실제 동작"""
+        """토글 상태 변경 시 라벨/스타일 갱신 + 버튼 상태를 button_data(1byte)에 반영"""
         # 1) 라벨/스타일 갱신
         on_label, off_label = self._toggle_labels[btn]
         btn.setText(on_label if checked else off_label)
         self._apply_toggle_style(btn, checked)
 
-        if btn is self.launch1_button:
-            self._send_cmd("LAUNCH1_ARM" if checked else "LAUNCH1_SAFE")
-        elif btn is self.launch2_button:
-            self._send_cmd("LAUNCH2_ARM" if checked else "LAUNCH2_SAFE")
-        elif btn is self.launch_stop_button:
-            self._send_cmd("LAUNCH_STOP_ON" if checked else "LAUNCH_STOP_OFF")
-        elif btn is self.emergency_parachute_button:
-            self._send_cmd("PARACHUTE_READY" if checked else "PARACHUTE_IDLE")
-        elif btn is self.staging_stop_button:
-            self._send_cmd("STAGING_STOP_ON" if checked else "STAGING_STOP_OFF")
-        elif btn is self.emergency_staging_button:
-            self._send_cmd("EMER_STAGING_READY" if checked else "EMER_STAGING_IDLE")
-        elif btn is self.nc1_button:
-            self._send_cmd("NC1_ON" if checked else "NC1_OFF")
-        elif btn is self.nc2_button:
-            self._send_cmd("NC2_ON" if checked else "NC2_OFF")
-        elif btn is self.nc3_button:
-            self._send_cmd("NC3_ON" if checked else "NC3_OFF")
+        # 2) 현재 UI의 토글 상태들로부터 '새 버튼 바이트'를 완전히 재계산
+        new_val = 0
+
+        # bit0: launch1 & launch2 가 모두 ON일 때 1
+        if self.launch1_button.isChecked() and self.launch2_button.isChecked():
+            new_val |= (1 << 0)
+
+        # 나머지 비트: 개별 토글의 현재 상태를 그대로 반영
+        if self.launch_stop_button.isChecked():
+            new_val |= (1 << 1)
+        if self.emergency_parachute_button.isChecked():
+            new_val |= (1 << 2)
+        if self.staging_stop_button.isChecked():
+            new_val |= (1 << 3)
+        if self.emergency_staging_button.isChecked():
+            new_val |= (1 << 4)
+        if self.nc1_button.isChecked():
+            new_val |= (1 << 5)
+        if self.nc2_button.isChecked():
+            new_val |= (1 << 6)
+        if self.nc3_button.isChecked():
+            new_val |= (1 << 7)
+
+        # 3) 최신 값 저장 (변화가 있을 때만 append 하고 싶다면 if 조건 추가)
+        # if self.datahub.button_data.size == 0 or int(self.datahub.button_data[-1]) != new_val:
+        self.datahub.button_data = np.append(self.datahub.button_data, np.uint8(new_val))
 
     # Run when start button is clicked
     def start_button_clicked(self):

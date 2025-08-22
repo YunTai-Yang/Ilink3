@@ -62,12 +62,40 @@ class Datahub:
         self.pitchs      = empty(0)
         self.yaws        = empty(0)
 
+        self.button_data = np.array([], dtype=np.uint8)
+        self.button_names = ["launch","launch_stop","emergency_parachute","staging_stop","mergency_staging","nc1_button","nc2_button","nc3_button"]
+
+
         # ENU 기준 (자동/수동 설정)
         self._ref_lla  = None   # (lat, lon, h)
         self._ref_ecef = None   # np.array([x,y,z])
 
         # map view trigger
         self.trigger_python = 0
+
+    def latest_button(self):
+        """최근 버튼 데이터 1바이트 반환 (없으면 None)"""
+        if self.button_data.size == 0:
+            return None
+        return int(self.button_data[-1])
+
+    def button_bit(self, idx):
+        """특정 비트 확인 (idx=0~7). True/False 반환"""
+        if self.button_data.size == 0:
+            return None
+        if not (0 <= idx <= 7):
+            return None
+        val = int(self.button_data[-1])
+        return bool((val >> idx) & 0x01)
+
+    #uint8 안전 변환
+    @staticmethod
+    def _to_u8(val):
+        try:
+            i = int(val)
+        except Exception:
+            return np.uint8(0)
+        return np.uint8(i & 0xFF)
 
     # -------- 좌표변환 유틸 --------
     @staticmethod
@@ -289,30 +317,22 @@ class Datahub:
         self.vN_enu = append(self.vN_enu, vN_e)
         self.vU_enu = append(self.vU_enu, vU_e)
 
-    # -------- 데이터 갱신 (CSV/row 등) --------
+        # -------- 데이터 갱신 (CSV/row 등) --------
     def update_from_row(self, row):
-        """
-        row = (hours, mins, secs, tenmilis,
-               X, Y, Z, VX, VY, VZ,
-               a_p, a_y, a_r,
-               q0, q1, q2, q3,
-               w_p, w_y, w_r)
-
-        주의: X/Y/Z 및 VX/VY/VZ는 ECEF 기준이라고 가정.
-        """
         (hours, mins, secs, tenmilis,
-         x, y, z, vx, vy, vz,
-         a_p, a_y, a_r,
-         q0, q1, q2, q3,
-         w_p, w_y, w_r) = row
+        x, y, z, vx, vy, vz,
+        a_p, a_y, a_r,
+        q0, q1, q2, q3,
+        w_p, w_y, w_r,
+        *rest) = row   # row를 그대로 두고, 끝부분을 rest로 남겨둠
 
-        # time
+        # --- time ---
         self.hours    = append(self.hours,    hours)
         self.mins     = append(self.mins,     mins)
         self.secs     = append(self.secs,     secs)
         self.tenmilis = append(self.tenmilis, tenmilis)
 
-        # ECEF pos/vel
+        # --- ECEF pos/vel ---
         self.Easts  = append(self.Easts,  x)
         self.Norths = append(self.Norths, y)
         self.Ups    = append(self.Ups,    z)
@@ -321,28 +341,27 @@ class Datahub:
         self.vN = append(self.vN, vy)
         self.vU = append(self.vU, vz)
 
-        # accel / gyro
+        # --- accel / gyro ---
         self.Xaccels     = append(self.Xaccels,     a_p)
         self.Yaccels     = append(self.Yaccels,     a_y)
         self.Zaccels     = append(self.Zaccels,     a_r)
         self.rollSpeeds  = append(self.rollSpeeds,  w_p)
         self.pitchSpeeds = append(self.pitchSpeeds, w_y)
         self.yawSpeeds   = append(self.yawSpeeds,   w_r)
-
-        # quat & euler
+    
+        # --- quat & euler ---
         self.q0 = append(self.q0, q0)
         self.q1 = append(self.q1, q1)
         self.q2 = append(self.q2, q2)
         self.q3 = append(self.q3, q3)
 
         lat_deg, lon_deg, _ = self._ecef_to_lla(x, y, z)
-
         r, p, y_ = Datahub.euler_from_quat_body_to_enu_zxy(q0, q1, q2, q3, lat_deg, lon_deg)
         self.rolls  = append(self.rolls,  r)
         self.pitchs = append(self.pitchs, p)
         self.yaws   = append(self.yaws,   y_)
 
-        # --- ECEF → ENU 변환 및 저장 (핵심 추가) ---
+        # --- ECEF → ENU 변환 및 저장 ---
         self._ensure_ref_from_first_ecef(float(x), float(y), float(z))
         lat0, lon0, _ = self._ref_lla
 
