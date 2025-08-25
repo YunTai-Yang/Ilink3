@@ -165,7 +165,7 @@ class GraphViewer_Thread(QThread):
                 hours  = self.datahub.hours[-n:] * 3600.0
                 minutes= self.datahub.mins[-n:]  * 60.0
                 seconds= self.datahub.secs[-n:]
-                millis = self.datahub.tenmilis[-n:] / 1000.0
+                millis = self.datahub.tenmilis[-n:] / 100.0
                 t_abs = hours + minutes + seconds + millis
                 t0 = (self.datahub.hours[0]*3600.0 + self.datahub.mins[0]*60.0
                     + self.datahub.secs[0] + self.datahub.tenmilis[0]/1000.0)
@@ -197,7 +197,7 @@ class GraphViewer_Thread(QThread):
                 hours  = self.datahub.hours[s:] * 3600.0
                 minutes= self.datahub.mins[s:]  * 60.0
                 seconds= self.datahub.secs[s:]
-                millis = self.datahub.tenmilis[s:] / 1000.0
+                millis = self.datahub.tenmilis[s:] / 100.0
                 t_abs = hours + minutes + seconds + millis
                 # 윈도 첫 샘플 기준 0
                 self.time[:] = t_abs - t_abs[0]
@@ -903,7 +903,7 @@ class RocketViewer_Thread(QThread):
 
         self.speed_label.setText(f"Speed {_fmt(spd,'m/s')}")
 
-        alt = _last(self.datahub.vU_enu)
+        alt = _last(self.datahub.u_enu)
         self.altitude_label.setText(f"Altitude {_fmt(alt,'m')}")
 
         # 4) 각도 레이블(이미 deg): Datahub 계산값 그대로 사용
@@ -1317,11 +1317,15 @@ class MainWindow(PageWindow):
 
             input_dialog = QInputDialog(self)
             input_dialog.setStyleSheet("QInputDialog {background-color: white;}")
-            FileName, ok = input_dialog.getText(self, 'Input Dialog', 'Enter your File Name', QLineEdit.Normal, "Your File Name")
-        
-            file_dir = dirname(self.dir_path)
-            file_path = join(file_dir,FileName)+".csv"
+            FileName, ok = input_dialog.getText(
+                self, 'Input Dialog', 'Enter your File Name', QLineEdit.Normal, "Your File Name"
+            )
+            file_dir = os.path.join(os.path.dirname(self.dir_path), "log")
+            os.makedirs(file_dir, exist_ok=True)
+            file_path = os.path.join(file_dir, FileName) + ".csv"
+
             port_text = self.rf_port_edit.text().strip().upper()
+
             if port_text == "CSV":
                 # 파일 선택 (로그 폴더 기본, 없다면 현재 폴더)
                 start_dir = os.path.join(dirname(self.dir_path), "log")
@@ -1364,41 +1368,68 @@ class MainWindow(PageWindow):
                     self.rf_port_edit.setEnabled(True)
                     self.baudrate_edit.setEnabled(True)
                 return  # CSV 모드 처리는 여기서 종료
-            
-            else:
-                if exists(file_path):
-                    msg_box = QMessageBox(self)
-                    msg_box.setStyleSheet("QMessageBox {background-color: white;}")
-                    msg_box.information(self,"information","Same file already exist")
-                else:
-                    if ok:
-                        self.datahub.mySerialPort=self.rf_port_edit.text()
-                        self.datahub.myBaudrate = self.baudrate_edit.text()
-                        self.datahub.file_Name = FileName+'.csv'
-                        self.datahub.communication_start()
 
-                        print( "changed" )
-                        
-                        self.datahub.serial_port_error=-1
-                        if self.datahub.check_communication_error():
-                            warning_msg_box = QMessageBox(self)
-                            warning_msg_box.setStyleSheet("QMessageBox {background-color: white;}")
-                            warning_msg_box.warning(self,"warning","Check the Port or Baudrate again.")
-                            self.datahub.communication_stop()
-                        else:
-                            self.datahub.datasaver_start()
-                            self.now_status.setText(ws.start_status)
-                            self.start_button.setEnabled(False)
-                            self.stop_button.setEnabled(True)
-                            self.rf_port_edit.setEnabled(False)
-                            self.baudrate_edit.setEnabled(False)
-                            self.shadow_start_button.setOffset(0)
-                            self.shadow_stop_button.setOffset(6)
-                            self.shadow_reset_button.setOffset(6)
-                    self.datahub.serial_port_error=-1
+            else:
+                if os.path.exists(file_path):
+                    QMessageBox.information(self, "information", "Same file already exist")
+
+                if ok:
+                    self.datahub.mySerialPort = self.rf_port_edit.text()
+                    self.datahub.myBaudrate   = self.baudrate_edit.text()
+                    self.datahub.file_Name    = FileName + '.csv'
+
+                    # 1) 통신 시작
+                    self.datahub.serial_port_error = -1
+                    self.datahub.communication_start()
+
+                    # 2) "알 수 없음" 상태로 초기화 후 Receiver의 판정 기다리기
+                    t0 = time.perf_counter()
+                    timeout_s = 2.5
+                    while (self.datahub.serial_port_error == -1
+                        and (time.perf_counter() - t0) < timeout_s):
+                        QApplication.processEvents()
+                        time.sleep(0.01)
+
+                    status = self.datahub.serial_port_error
+
+                    if status != 0:
+                        # 실패(1) 또는 타임아웃(-1 그대로) → 에러 처리
+                        QMessageBox.warning(self, "warning", "Check the Port or Baudrate again.")
+                        self.datahub.communication_stop()
+                        # UI 복구
+                        self.start_button.setEnabled(True)
+                        self.stop_button.setEnabled(False)
+                        self.rf_port_edit.setEnabled(True)
+                        self.baudrate_edit.setEnabled(True)
+                    else:
+                        # 성공
+                        self.datahub.datasaver_start()
+                        self.now_status.setText(ws.start_status)
+                        self.start_button.setEnabled(False)
+                        self.stop_button.setEnabled(True)
+                        self.rf_port_edit.setEnabled(False)
+                        self.baudrate_edit.setEnabled(False)
+                        self.shadow_start_button.setOffset(0)
+                        self.shadow_stop_button.setOffset(6)
+                        self.shadow_reset_button.setOffset(6)
+
         else:
+            # reset 후 재시작 분기도 동일하게 대기/판정 처리 권장
             self.datahub.communication_start()
-            self.datahub.serial_port_error=-1
+            self.datahub.serial_port_error = -1
+            t0 = time.perf_counter()
+            timeout_s = 2.5
+            while (self.datahub.serial_port_error == -1
+                and (time.perf_counter() - t0) < timeout_s):
+                QApplication.processEvents()
+                time.sleep(0.01)
+
+            status = self.datahub.serial_port_error
+            if status != 0:
+                QMessageBox.warning(self, "warning", "Check the Port or Baudrate again.")
+                self.datahub.communication_stop()
+                return
+
             self.now_status.setText(ws.start_status)
             self.now_status.setStyleSheet("color:#00FF00;")
             self.start_button.setEnabled(False)
@@ -1408,7 +1439,7 @@ class MainWindow(PageWindow):
             self.shadow_start_button.setOffset(0)
             self.shadow_stop_button.setOffset(6)
             self.shadow_reset_button.setOffset(6)
-            self.resetcheck = 0  
+            self.resetcheck = 0
 
     # Run when stop button is clicked
     def stop_button_clicked(self):
@@ -1427,7 +1458,8 @@ class MainWindow(PageWindow):
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
         self.reset_button.setEnabled(True)
-        self.rf_port_edit.setEnabled(False)
+        self.rf_port_edit.setEnabled(True)
+        self.baudrate_edit.setEnabled(True)
         self.shadow_start_button.setOffset(6)
         self.shadow_stop_button.setOffset(0)
         self.shadow_reset_button.setOffset(6)

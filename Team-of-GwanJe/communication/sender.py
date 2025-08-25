@@ -1,137 +1,145 @@
 from struct import pack
-from serial import Serial, PARITY_NONE, STOPBITS_TWO, EIGHTBITS
+from serial import Serial, PARITY_NONE, STOPBITS_ONE, EIGHTBITS
 from threading import Thread, Lock
 from queue import Queue, Empty
 from time import sleep
 import numpy as np
-from typing import Sequence, Union, Iterable
+from typing import Sequence, Union, Iterable, Callable, Optional
+
 
 class Sender(Thread):
-    def __init__(self, datahub=None, *, endianness: str = '<'):
+    """
+    - 기본 동작: Receiver가 연 시리얼 핸들을 공유(get_serial로 주입)하여 write만 수행.
+      -> 동일 포트를 2번 여는 문제 방지.
+    - get_serial을 주지 않으면 setSerial(...)로 직접 열어 사용할 수도 있음(8N1).
+    - 전송 실패 플래그는 datahub.sender_error (-1:대기, 0:성공/정상, 1:실패) 만 사용.
+      수신 쪽 datahub.serial_port_error 는 건드리지 않음.
+    """
+    def __init__(self,
+                 datahub=None,
+                 *,
+                 get_serial: Optional[Callable[[], Optional[Serial]]] = None,
+                 serial_lock: Optional[Lock] = None,
+                 endianness: str = '<'):
         super().__init__(daemon=True)
         self.datahub = datahub
         self.endianness = endianness  # '<' little-endian (default), '>' big-endian
-        self.ser: Serial | None = None
-        self.first_time = True
-        self._lock = Lock()
-        self._q: "Queue[tuple[str, object]]" = Queue()  # (kind, payload)
+
+        # 공유 모드: Receiver가 가진 ser을 콜백으로 받아옴
+        self._get_serial = get_serial
+        self._shared_lock = serial_lock or Lock()
+
+        # 독립 모드: Sender가 직접 open한 ser을 보관
+        self._own_ser: Optional[Serial] = None
+        self._first_time = True
+
+        self._q: "Queue[tuple[str, object]]" = Queue()
         self._running = True
 
-        # Optional: mirror Receiver.py's error flag if datahub provided
-        if self.datahub is not None and not hasattr(self.datahub, "serial_port_error"):
-            self.datahub.serial_port_error = 0
+        if self.datahub is not None:
+            # 송신 상태 플래그 (수신 플래그와 분리)
+            if not hasattr(self.datahub, "sender_error"):
+                self.datahub.sender_error = -1
 
-    # ---------- Serial ----------
+    # ---------- Serial (독립 모드에서만 사용) ----------
     def setSerial(self, port: str, baudrate: int):
-        self.ser = Serial(
+        """독립 모드: Sender가 직접 포트를 열어 사용(8N1). 가능하면 공유 모드 권장."""
+        self._own_ser = Serial(
             port=port,
             baudrate=int(baudrate),
             parity=PARITY_NONE,
-            stopbits=STOPBITS_TWO,
+            stopbits=STOPBITS_ONE,      # MCU/Receiver와 동일(8N1)
             bytesize=EIGHTBITS,
             timeout=0.2,
         )
 
-    def _ensure_open(self):
-        if self.ser is None:
-            # Prefer Datahub config if available
-            if self.datahub is None:
-                raise RuntimeError("Serial not initialized; call setSerial(...) first.")
-            self.setSerial(self.datahub.mySerialPort, self.datahub.myBaudrate)
-        if not self.ser.is_open:
-            self.ser.open()
+    def _current_ser(self) -> Optional[Serial]:
+        """현재 사용할 Serial 핸들(공유 우선)."""
+        if self._get_serial is not None:
+            try:
+                return self._get_serial()
+            except Exception:
+                return None
+        return self._own_ser
 
-    # ========== 신규: 버튼 패킷 ==========
+    def _ensure_open_if_own(self):
+        """독립 모드일 때만 open 보장. 공유 모드에선 Receiver가 관리."""
+        if self._get_serial is not None:
+            return  # 공유 모드: Receiver가 열고 닫음
+        if self._own_ser is None:
+            raise RuntimeError("Serial not initialized; call setSerial(...) first or provide get_serial.")
+        if not self._own_ser.is_open:
+            self._own_ser.open()
+
+    # ========== 버튼 패킷 ==========
     def build_packet_button(self, button_byte: int) -> bytes:
         """
         Packet: 'A','B', data_len, button_data, checksum, 'Z'
-        - data_len: payload 길이 (button_data + checksum + 'Z') = 3
-        - checksum: 간단히 button_data의 8비트 합 (여기선 그대로 에코)로 설정
-                    필요 시 (button_data) & 0xFF, 또는 (~sum)&0xFF 등으로 변경 가능
+        - data_len: 3 (button + checksum + 'Z')
+        - checksum: 여기선 button 바이트를 그대로 사용 (필요 시 XOR/합 등으로 교체 가능)
         """
         b = int(button_byte) & 0xFF
-        checksum = b  # <-- 필요하면 (b) & 0xFF, 또는 (~b)&0xFF 등으로 바꿔도 됨
-
-        payload = bytes([b, checksum]) + b'Z'  # [button_data, checksum, 'Z']
-        data_len = len(payload)                # 3
-        if data_len > 255:
-            raise ValueError("Payload too large.")
-
-        header = b'A' + b'B' + bytes([data_len])
+        checksum = b
+        payload = bytes([b, checksum]) + b'Z'      # 3 bytes
+        header  = b'A' + b'B' + bytes([len(payload)])
         return header + payload
 
     def send_button_now(self, button_byte: int) -> bool:
         """버튼 바이트 1개를 즉시(동기) 전송."""
         try:
-            self._ensure_open()
+            self._ensure_open_if_own()
+            ser = self._current_ser()
+            if ser is None or not ser.is_open:
+                raise RuntimeError("Serial not available/open.")
             pkt = self.build_packet_button(button_byte)
-            with self._lock:
-                self.ser.write(pkt)
+            with self._shared_lock:
+                ser.write(pkt)
             if self.datahub is not None:
-                self.datahub.serial_port_error = 0
+                self.datahub.sender_error = 0
             return True
         except Exception:
             if self.datahub is not None:
-                self.datahub.serial_port_error = 1
-            try:
-                if self.ser and self.ser.is_open:
-                    self.ser.close()
-            except Exception:
-                pass
+                self.datahub.sender_error = 1
             return False
 
     def enqueue_button(self, button_byte: int):
-        """스레드 루프에서 보낼 버튼 패킷을 큐에 적재."""
         self._q.put(("button", int(button_byte) & 0xFF))
 
-    # ========== 기존: float 패킷(유지) ==========
+    # ========== float 패킷(기존 호환) ==========
     def build_packet(self, order_values: Sequence[Union[float, int]]) -> bytes:
-        # Normalize to float32 array
         arr = np.asarray(order_values, dtype=np.float32).ravel()
         if arr.size == 0:
             raise ValueError("order_values must contain at least one number.")
 
-        # checksum as float32 sum
         checksum = np.float32(np.sum(arr))
-
-        # body = order floats + checksum (float32)
         body = pack(f'{self.endianness}{arr.size}f', *arr) + pack(f'{self.endianness}f', float(checksum))
-
-        # payload = body + 'Z'
         payload = body + b'Z'
-        msg_len = len(payload)  # must fit in one byte
+        msg_len = len(payload)
         if msg_len > 255:
-            # Max floats N such that 4*N + 4 + 1 <= 255 -> N <= 62
+            # 4*N + 4 + 1 <= 255 → N <= 62
             raise ValueError(f"Payload too large ({msg_len} bytes). Reduce number of floats.")
-
-        # header = 'A','B',len
         header = b'A' + b'B' + bytes([msg_len])
-
         return header + payload
 
     def send_now(self, order_values: Sequence[Union[float, int]]) -> bool:
-        """기존 float 패킷 동기 전송 (호환 유지)."""
         try:
-            self._ensure_open()
+            self._ensure_open_if_own()
+            ser = self._current_ser()
+            if ser is None or not ser.is_open:
+                raise RuntimeError("Serial not available/open.")
             pkt = self.build_packet(order_values)
-            with self._lock:
-                self.ser.write(pkt)
+            with self._shared_lock:
+                ser.write(pkt)
             if self.datahub is not None:
-                self.datahub.serial_port_error = 0
+                self.datahub.sender_error = 0
             return True
         except Exception:
             if self.datahub is not None:
-                self.datahub.serial_port_error = 1
-            try:
-                if self.ser and self.ser.is_open:
-                    self.ser.close()
-            except Exception:
-                pass
+                self.datahub.sender_error = 1
             return False
 
-    # ---------- Queued / threaded send ----------
+    # ---------- 큐 전송 ----------
     def enqueue(self, order_values: Union[float, int, Iterable[Union[float, int]]]):
-        """기존 float 패킷 큐잉 (호환 유지)."""
         if isinstance(order_values, (float, int)):
             vals = [order_values]
         else:
@@ -144,56 +152,53 @@ class Sender(Thread):
         self._running = False
 
     def run(self):
-        """
-        datahub가 있으면:
-        - datahub.iscommunication_start 가 True일 때 포트 열고 큐에서 전송
-        - False면 닫고 대기
-        """
         while self._running:
             try:
-                comm_on = True
-                if self.datahub is not None:
-                    comm_on = bool(self.datahub.iscommunication_start)
-
-                if comm_on:
-                    if self.first_time:
-                        if self.ser is None:
-                            if self.datahub is None:
-                                raise RuntimeError("Serial not initialized; call setSerial(...) or provide datahub.")
-                            self.setSerial(self.datahub.mySerialPort, self.datahub.myBaudrate)
-                        self.first_time = False
-
-                    self._ensure_open()
-                    if self.datahub is not None:
-                        self.datahub.serial_port_error = 0
-
-                    try:
-                        kind, payload = self._q.get(timeout=0.05)
-                    except Empty:
-                        continue
-
-                    if kind == "button":
-                        pkt = self.build_packet_button(int(payload))
-                    else:  # "floats"
-                        pkt = self.build_packet(payload)
-
-                    with self._lock:
-                        self.ser.write(pkt)
-
-                else:
-                    if self.ser is not None and self.ser.is_open:
-                        self.ser.close()
+                # 통신 On/Off는 datahub 플래그를 따름(없으면 항상 On)
+                comm_on = bool(getattr(self.datahub, "iscommunication_start", True))
+                if not comm_on:
                     sleep(0.05)
+                    continue
+
+                # 독립 모드일 때만 open 보장
+                if self._first_time:
+                    if self._get_serial is None and self._own_ser is None:
+                        # 독립 모드인데 setSerial 안 했으면 구성 오류
+                        raise RuntimeError("Sender: setSerial(...) or get_serial must be provided.")
+                    self._first_time = False
+                self._ensure_open_if_own()
+
+                # 큐에서 하나 가져와 전송
+                try:
+                    kind, payload = self._q.get(timeout=0.05)
+                except Empty:
+                    continue
+
+                ser = self._current_ser()
+                if ser is None or not ser.is_open:
+                    # 공유 모드: 아직 Receiver가 포트를 못 열었을 수 있음
+                    continue
+
+                if kind == "button":
+                    pkt = self.build_packet_button(int(payload))
+                else:  # "floats"
+                    pkt = self.build_packet(payload)
+
+                with self._shared_lock:
+                    ser.write(pkt)
+
+                if self.datahub is not None:
+                    self.datahub.sender_error = 0
 
             except Exception:
                 if self.datahub is not None:
-                    self.datahub.serial_port_error = 1
+                    self.datahub.sender_error = 1
                 sleep(0.05)
 
-        # cleanup on stop
+        # 종료 시: 독립 모드면 닫고, 공유 모드면 건드리지 않음
         try:
-            if self.ser and self.ser.is_open:
-                self.ser.close()
+            if self._get_serial is None and self._own_ser and self._own_ser.is_open:
+                self._own_ser.close()
         except Exception:
             pass
 
@@ -201,16 +206,18 @@ class Sender(Thread):
 if __name__ == "__main__":
     import time
 
-    snd = Sender(datahub=None, endianness='<')
-    snd.setSerial(port='COM3', baudrate=9600)
-    snd.start()
+    # 예시 1) 독립 모드 (테스트 장비로 송신만)
+    # snd = Sender(get_serial=None)
+    # snd.setSerial(port='COM3', baudrate=115200)
+    # snd.start()
+    # snd.enqueue_button(0x91)
+    # snd.enqueue([1.0, 2.0, 3.5])
+    # time.sleep(0.5)
+    # snd.stop(); snd.join()
 
-    # 버튼 전송 (예: 0b10010001)
-    snd.enqueue_button(0x91)
-
-    # 기존 float 전송도 그대로 가능
-    snd.enqueue([1.0, 2.0, 3.5])
-
-    time.sleep(0.5)
-    snd.stop()
-    snd.join()
+    # 예시 2) 공유 모드 (Receiver가 연 포트를 공유)
+    #   from communication.receiver import Receiver
+    #   rx = Receiver(datahub); rx.start()
+    #   snd = Sender(datahub, get_serial=lambda: rx.ser)
+    #   snd.start()
+    pass
