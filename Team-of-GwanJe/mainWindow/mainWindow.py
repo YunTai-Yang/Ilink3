@@ -168,7 +168,7 @@ class GraphViewer_Thread(QThread):
                 millis = self.datahub.tenmilis[-n:] / 100.0
                 t_abs = hours + minutes + seconds + millis
                 t0 = (self.datahub.hours[0]*3600.0 + self.datahub.mins[0]*60.0
-                    + self.datahub.secs[0] + self.datahub.tenmilis[0]/1000.0)
+                    + self.datahub.secs[0] + self.datahub.tenmilis[0]/100.0)
                 self.time[-n:] = t_abs - t0
 
         else:
@@ -1349,7 +1349,11 @@ class MainWindow(PageWindow):
             port_text = self.rf_port_edit.text().strip().upper()
 
             if port_text == "CSV":
-                # 파일 선택 (로그 폴더 기본, 없다면 현재 폴더)
+                # 1) TX 포트/보드레이트 입력 자체를 잠금 (추가 설정 불필요)
+                self.sender_port_edit.setEnabled(False)
+                self.sender_baudrate_edit.setEnabled(False)
+
+                # 선택한 CSV 파일 열기…
                 start_dir = os.path.join(dirname(self.dir_path), "log")
                 if not os.path.isdir(start_dir):
                     start_dir = dirname(self.dir_path)
@@ -1358,10 +1362,14 @@ class MainWindow(PageWindow):
                     self, "Select CSV to Replay", start_dir, "CSV Files (*.csv);;All Files (*)"
                 )
                 if not csv_path:
-                    return  # 사용자 취소
+                    # 사용자가 취소 → UI 원복
+                    self.sender_port_edit.setEnabled(True)
+                    self.sender_baudrate_edit.setEnabled(True)
+                    return
 
                 self.replay_csv_path = csv_path
-                # 통신 시작 플래그 등 UI 상태 업데이트만 동일하게
+
+                # 2) 통신 플래그/저장기 시작은 그대로 (UI 상태용)
                 self.datahub.communication_start()
                 self.datahub.datasaver_start()
                 self.now_status.setText(ws.start_status)
@@ -1373,23 +1381,24 @@ class MainWindow(PageWindow):
                 self.shadow_stop_button.setOffset(6)
                 self.shadow_reset_button.setOffset(6)
 
-                # CSVPlayer 시작 & 그래프 업데이트 연결
+                # 3) CSVPlayer 시작
                 try:
                     self.csv_player = CSVPlayer(self.replay_csv_path, self.datahub, hz=5.0, parent=self)
-                    # 새 샘플 마다 2D 그래프 즉시 갱신 (3D/맵은 자체 타이머로 갱신)
                     self.csv_player.sampleReady.connect(self.graphviewer.update_data)
                     self.csv_player.start()
                 except Exception as e:
                     print(f"[CSVPlayer] start error: {e}")
                     QMessageBox.warning(self, "warning", "CSV 재생 시작 실패")
-                    # UI 복구
                     self.datahub.communication_stop()
                     self.datahub.datasaver_stop()
+                    # UI 복구
                     self.start_button.setEnabled(True)
                     self.stop_button.setEnabled(False)
                     self.rf_port_edit.setEnabled(True)
                     self.baudrate_edit.setEnabled(True)
-                return  # CSV 모드 처리는 여기서 종료
+                    self.sender_port_edit.setEnabled(True)
+                    self.sender_baudrate_edit.setEnabled(True)
+                return  # CSV 모드는 여기서 종료
 
             else:
                 if os.path.exists(file_path):
@@ -1484,6 +1493,8 @@ class MainWindow(PageWindow):
         self.reset_button.setEnabled(True)
         self.rf_port_edit.setEnabled(True)
         self.baudrate_edit.setEnabled(True)
+        self.sender_port_edit.setEnabled(True)
+        self.sender_baudrate_edit.setEnabled(True)
         self.shadow_start_button.setOffset(6)
         self.shadow_stop_button.setOffset(0)
         self.shadow_reset_button.setOffset(6)
@@ -1512,6 +1523,8 @@ class MainWindow(PageWindow):
             self.stop_button.setEnabled(False)
             self.reset_button.setEnabled(False)
             self.rf_port_edit.setEnabled(False)
+            self.sender_port_edit.setEnabled(True)
+            self.sender_baudrate_edit.setEnabled(True)
             self.shadow_start_button.setOffset(6)
             self.shadow_stop_button.setOffset(0)
             self.shadow_reset_button.setOffset(0)
@@ -1603,38 +1616,129 @@ class CSVPlayer(QThread):
         self._running = True
         self._paused = False
 
+        # 시간 처리용 내부 상태
+        self._ten_div = 100.0   # tenmilis 스케일(기본 10ms → /100, ms면 /1000 로 자동 감지)
+        self._epoch = None
+        self._prev_raw = None
+        self._t0 = None
+
     def stop(self):
         self._running = False
 
     def pause(self, yes=True):
         self._paused = yes
 
+    def _abs_time_val(self, h, m, s, ten):
+        """(h,m,s,ten) → 초 단위 절대시간(당일 기준). self._ten_div 로 스케일."""
+        return h*3600.0 + m*60.0 + s + ten/self._ten_div
+
+    def _abs_time_row(self, row):
+        """row(list[float]): 0..3 에 시간열 가정"""
+        h, m, s, ten = row[0], row[1], row[2], row[3]
+        return self._abs_time_val(h, m, s, ten)
+
+    def _decide_ten_div(self, cleaned):
+        """tenmilis 스케일 자동 판별: 값이 120 이상 자주 나오면 ms(0..999)로 간주."""
+        try:
+            ten_vals = [r[3] for r in cleaned]
+            ten_max = max(ten_vals)
+            # 120 넘으면 ms라고 가정(여유 있는 컷오프)
+            self._ten_div = 1000.0 if ten_max > 120.0 else 100.0
+        except Exception:
+            self._ten_div = 100.0
+
+    def _feed_monotonic_time(self, h, m, s, ten):
+        """단조증가 시간 t를 계산하여 datahub.t 에 append."""
+        raw = self._abs_time_val(h, m, s, ten)
+
+        if self._epoch is None:
+            self._epoch = 0.0
+            self._prev_raw = raw
+            self._t0 = raw
+
+        # 시계가 뒤로 감긴 경우(epoch 보정)
+        if raw < self._prev_raw - 0.2:
+            drop = self._prev_raw - raw
+            if drop > 3600.0:
+                # 큰 폭 드롭(예: 자정 등) → 하루 붙이기
+                self._epoch += 24*3600.0
+            else:
+                # 소폭 드롭 → 떨어진 만큼 이어붙이기
+                self._epoch += drop
+
+        self._prev_raw = raw
+        t_mono = (raw - self._t0) + self._epoch
+
+        # datahub.t 에 단조 시간 주입
+        try:
+            self.datahub.t = np.append(self.datahub.t, float(t_mono))
+        except AttributeError:
+            self.datahub.t = np.array([float(t_mono)], dtype=float)
+
     def run(self):
-        df = pd.read_csv(self.csv_path, header=None, names=COLUMN_NAMES)
-        dt = 1.0 / max(1e-6, self.hz)
+        # 헤더 유무에 상관없이 20열로 강제 매핑
+        try:
+            df = pd.read_csv(self.csv_path, header=None, names=COLUMN_NAMES, dtype=str)
+        except Exception as e:
+            print(f"[CSVPlayer] CSV load error: {e}")
+            return
+
+        # 전처리: 공백/NaN 제거 + 숫자 캐스팅 + 열 개수 보정
+        cleaned = []
+        for i, row in enumerate(df.itertuples(index=False, name=None)):
+            if len(row) < len(COLUMN_NAMES):
+                continue
+            try:
+                vals = [float(x) for x in row[:len(COLUMN_NAMES)]]
+            except Exception:
+                continue
+            cleaned.append(vals)
+
+        if not cleaned:
+            print("[CSVPlayer] no valid rows after cleaning")
+            return
+
+        # (1) tenmilis 스케일 자동 판별
+        self._decide_ten_div(cleaned)
+
+        # (2) 절대시간 기준 정렬 (시계 점프가 있어도 기본 순서 안정화)
+        cleaned.sort(key=self._abs_time_row)
+
+        # 재생 루프
+        dt = 1.0 / max(1e-3, self.hz)
         next_t = time.perf_counter()
 
-        for _, row in df.iterrows():
+        for vals in cleaned:
             if not self._running:
                 break
 
-            # pause
             while self._paused and self._running:
                 time.sleep(0.05)
 
-            # push one sample
-            self.datahub.update_from_row(row.values.tolist())
+            # (3) 단조시간 생성 → datahub.t 에 먼저 공급
+            try:
+                h, m, s, ten = vals[0], vals[1], vals[2], vals[3]
+                self._feed_monotonic_time(h, m, s, ten)
+            except Exception as e:
+                # 시간계산 실패해도 데이터는 계속 흘려보내기
+                print(f"[CSVPlayer] time gen error: {e}")
 
-            # tell UI “new sample”
+            # (4) 데이터 업데이트
+            try:
+                self.datahub.update_from_row(vals)
+            except Exception as e:
+                print(f"[CSVPlayer] row error: {e}")
+                # 이 샘플은 스킵하되 재생은 계속
+                continue
+
             self.sampleReady.emit()
 
-            # pacing ~ 5 Hz
+            # (5) 재생 속도 제어
             next_t += dt
             sleep_for = next_t - time.perf_counter()
             if sleep_for > 0:
                 time.sleep(sleep_for)
             else:
-                # if lagging, reset target to now
                 next_t = time.perf_counter()
 
 class TimeAxisItem(AxisItem):

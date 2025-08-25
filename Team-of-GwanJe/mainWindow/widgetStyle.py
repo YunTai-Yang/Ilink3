@@ -54,7 +54,7 @@ ay_checker_geomoetry = np.array([a*0.01,  b*0.805,  100,  30]).astype(int)
 az_checker_geomoetry = np.array([a*0.01,  b*0.845,  100,  30]).astype(int)
 
 # gps map
-map_geometry = np.array([a*0.79,  b*0.65,  a*0.20,  a*0.180]).astype(int)
+map_geometry = np.array([a*0.79,  b*0.65,  a*0.20,  a*0.16]).astype(int)
 
 # serial port editer geometry
 port_text_geometry = np.array([a*0.575,  b*0.865, a*0.04, a*0.01125]).astype(int)
