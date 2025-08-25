@@ -54,20 +54,24 @@ ay_checker_geomoetry = np.array([a*0.01,  b*0.805,  100,  30]).astype(int)
 az_checker_geomoetry = np.array([a*0.01,  b*0.845,  100,  30]).astype(int)
 
 # gps map
-map_geometry = np.array([a*0.79,  b*0.73,  a*0.20,  a*0.12]).astype(int)
+map_geometry = np.array([a*0.79,  b*0.65,  a*0.20,  a*0.180]).astype(int)
 
 # serial port editer geometry
-port_text_geometry = np.array([a*0.66,  b*0.86, a*0.04, a*0.01125]).astype(int)
-port_edit_geometry = np.array([a*0.71,  b*0.86,  a*0.06, a*0.01125]).astype(int)
+port_text_geometry = np.array([a*0.575,  b*0.865, a*0.04, a*0.01125]).astype(int)
+port_edit_geometry = np.array([a*0.625,  b*0.865,  a*0.04, a*0.01125]).astype(int)
+sender_port_text_geometry = np.array([a*0.68,  b*0.865, a*0.04, a*0.01125]).astype(int)
+sender_port_edit_geometry = np.array([a*0.73,  b*0.865,  a*0.04, a*0.01125]).astype(int)
 
 # serial baudrate editer geometry
-baudrate_text_geometry = np.array([a*0.66,  b*0.90, a*0.05, a*0.01125]).astype(int)
-baudrate_edit_geometry = np.array([a*0.71,  b*0.90,  a*0.06, a*0.01125]).astype(int)
+baudrate_text_geometry = np.array([a*0.575,  b*0.905, a*0.05, a*0.01125]).astype(int)
+baudrate_edit_geometry = np.array([a*0.625,  b*0.905,  a*0.04, a*0.01125]).astype(int)
+sender_baudrate_text_geometry = np.array([a*0.68,  b*0.905, a*0.05, a*0.01125]).astype(int)
+sender_baudrate_edit_geometry = np.array([a*0.73,  b*0.905,  a*0.04, a*0.01125]).astype(int)
 
 # start/stop button geometry
-start_geometry = np.array([a*0.45, b*0.85, 0.08*a,  0.05*a ]).astype(int)
-stop_geometry = np.array([a*0.57, b*0.85, 0.08*a, 0.05*a]).astype(int)
-reset_geometry = np.array([a*0.33, b*0.85, 0.08*a, 0.05*a]).astype(int)
+start_geometry = np.array([a*0.41, b*0.85, 0.07*a,  0.05*a ]).astype(int)
+stop_geometry = np.array([a*0.495, b*0.85, 0.07*a, 0.05*a]).astype(int)
+reset_geometry = np.array([a*0.325, b*0.85, 0.07*a, 0.05*a]).astype(int)
 status_geometry = np.array([a*0.67, b*0.79, 0.1*a, 0.05*a]).astype(int)
 
 # buttons geometry

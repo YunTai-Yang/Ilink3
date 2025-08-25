@@ -999,12 +999,18 @@ class MainWindow(PageWindow):
 
         self.now_status = QLabel(ws.wait_status,self.container)
         self.rf_port_edit = QLineEdit("COM8",self.container)
-        self.port_text = QLabel("Port:",self.container)
+        self.sender_port_edit = QLineEdit("COM1",self.container)
+        self.port_text = QLabel("Rx_Port:",self.container)
+        self.sender_port_text = QLabel("Tx_Port:",self.container)
         self.baudrate_edit = QLineEdit("115200",self.container)
-        self.baudrate_text = QLabel("Baudrate:",self.container)
+        self.sender_baudrate_edit = QLineEdit("115200",self.container)
+        self.baudrate_text = QLabel("Rx_Baudrate:",self.container)
+        self.sender_baudrate_text = QLabel("Tx_Baudrate:",self.container)
         self.guide_text = QLabel(ws.guide,self.container)
         self.port_text.setStyleSheet("color: white;")
+        self.sender_port_text.setStyleSheet("color: white;")
         self.baudrate_text.setStyleSheet("color: white;")
+        self.sender_baudrate_text.setStyleSheet("color: white;")
 
         self.start_button.setFont(ws.font_start_text)
         self.stop_button.setFont(ws.font_stop_text)
@@ -1022,6 +1028,8 @@ class MainWindow(PageWindow):
 
         self.rf_port_edit.setStyleSheet("background-color: rgb(255,255,255);")
         self.baudrate_edit.setStyleSheet("background-color: rgb(255,255,255);")
+        self.sender_port_edit.setStyleSheet("background-color: rgb(255,255,255);")
+        self.sender_baudrate_edit.setStyleSheet("background-color: rgb(255,255,255);")
         self.start_button.setStyleSheet("background-color: rgb(200,0,0); color: rgb(250, 250, 250);font-weight: bold; font-weight: bold; border-radius: 25px;")
         self.stop_button.setStyleSheet("background-color: rgb(0,0,139); color: rgb(250, 250, 250);font-weight: bold; font-weight: bold; border-radius: 25px;")
         self.reset_button.setStyleSheet("background-color: rgb(120,120,140); color: rgb(250, 250, 250);font-weight: bold; font-weight: bold; border-radius: 25px;")
@@ -1038,13 +1046,17 @@ class MainWindow(PageWindow):
 
         self.baudrate_text.setFont(ws.font_baudrate)
         self.port_text.setFont(ws.font_portText)
+        self.sender_baudrate_text.setFont(ws.font_baudrate)
+        self.sender_port_text.setFont(ws.font_portText)
         self.guide_text.setFont(ws.font_guideText)
 
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
         self.reset_button.setEnabled(False)
         self.rf_port_edit.setEnabled(True)
+        self.sender_port_edit.setEnabled(True)
         self.baudrate_edit.setEnabled(True)
+        self.sender_baudrate_edit.setEnabled(True)
 
         """Set Buttons Connection"""
         self.start_button.clicked.connect(self.start_button_clicked)
@@ -1092,6 +1104,10 @@ class MainWindow(PageWindow):
         self.rf_port_edit.setGeometry(*ws.port_edit_geometry)
         self.baudrate_text.setGeometry(*ws.baudrate_text_geometry)
         self.baudrate_edit.setGeometry(*ws.baudrate_edit_geometry)
+        self.sender_port_text.setGeometry(*ws.sender_port_text_geometry)
+        self.sender_port_edit.setGeometry(*ws.sender_port_edit_geometry)
+        self.sender_baudrate_text.setGeometry(*ws.sender_baudrate_text_geometry)
+        self.sender_baudrate_edit.setGeometry(*ws.sender_baudrate_edit_geometry)
         self.guide_text.setGeometry(*ws.cmd_geometry)
         self.now_status.setGeometry(*ws.status_geometry)
         self.now_status.setFont(ws.font_status_text)
@@ -1248,6 +1264,12 @@ class MainWindow(PageWindow):
                 "background-color: rgb(60,60,70); color: white; border-radius: 12px;"
             )
     
+    def bin8_with_space(val: int) -> str:
+        """uint8 값을 '0000 0000' 형태의 이진 문자열로 변환"""
+        v = int(val) & 0xFF
+        s = format(v, '08b')   # 예: '00101101'
+        return f"{s[:4]} {s[4:]}"  # 예: '0010 1101'
+
     def on_toggle(self, btn, checked: bool):
         """토글 상태 변경 시 라벨/스타일 갱신 + 버튼 상태를 button_data(1byte)에 반영"""
         # 1) 라벨/스타일 갱신
@@ -1376,6 +1398,8 @@ class MainWindow(PageWindow):
                 if ok:
                     self.datahub.mySerialPort = self.rf_port_edit.text()
                     self.datahub.myBaudrate   = self.baudrate_edit.text()
+                    self.datahub.mySendSerialPort = self.sender_port_edit.text()
+                    self.datahub.mySendBaudrate   = self.sender_baudrate_edit.text()
                     self.datahub.file_Name    = FileName + '.csv'
 
                     # 1) 통신 시작

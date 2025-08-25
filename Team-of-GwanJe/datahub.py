@@ -9,8 +9,11 @@ class Datahub:
         self.isdatasaver_start = 0
         self.file_Name = 'Your File Name.csv'
         self.mySerialPort = 'COM8'
+        self.mySendSerialPort = 'COM1'
         self.myBaudrate = 115200
+        self.mySendBaudrate = 115200
         self.serial_port_error = -1
+        self.sender_error = -1              # Sender용: -1(대기), 0(정상), 1(오류)
 
         # 스레드 락 (수신/시각화 경합 방지)
         self.lock = threading.Lock()
@@ -176,6 +179,20 @@ class Datahub:
         deadline = time.perf_counter() + timeout
         while True:
             s = self.serial_port_error
+            if s in (0, 1):
+                return s
+            if time.perf_counter() >= deadline:
+                return 1
+            time.sleep(poll_ms / 1000.0)
+
+    def check_sender_error(self, timeout=2.0, poll_ms=50):
+        """
+        sender_error가 -1에서 0/1로 바뀔 때까지 기다림. 0=정상, 1=에러.
+        Sender 스레드가 전송 성공 시 0, 실패 시 1을 설정해야 함.
+        """
+        deadline = time.perf_counter() + timeout
+        while True:
+            s = self.sender_error
             if s in (0, 1):
                 return s
             if time.perf_counter() >= deadline:
