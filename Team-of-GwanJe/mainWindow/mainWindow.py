@@ -30,7 +30,7 @@ from datetime import timedelta
 from os.path import abspath, dirname, join, exists
 from sys import exit, argv
 
-from datahub import Datahub
+import datahub
 
 from pandas import read_csv
 
@@ -46,11 +46,12 @@ class PageWindow(QMainWindow):
         self.gotoSignal.emit(name)
 
 class GraphViewer_Thread(QThread):
-    def __init__(self, mainwindow,datahub):
+    def __init__(self, mainwindow, datahub, update_ms=50, tail_len=500):
         super().__init__()
         self.mainwindow = mainwindow
         self.datahub = datahub
 
+        # ---- 위젯/레이아웃(네 기존 ws.* 사용 유지) ----
         self.view = QWebEngineView(self.mainwindow.container)
         self.view.load(QUrl())
         self.view.setGeometry(*ws.webEngine_geometry)
@@ -66,7 +67,7 @@ class GraphViewer_Thread(QThread):
         self.pw_accel = PlotWidget(self.mainwindow.container)
         
         self.speed_title = QLabel(self.mainwindow.container)
-        self.speed_title.setText("<b>&#8226; Speed</b>")
+        self.speed_title.setText("<b>&#8226; Speed (ENU)</b>")
         self.speed_title.setStyleSheet("color: white;")
         self.pw_speed = PlotWidget(self.mainwindow.container)
         
@@ -81,128 +82,137 @@ class GraphViewer_Thread(QThread):
         self.angleSpeed_title.setFont(ws.font_angleSpeed_title)
         self.accel_title.setFont(ws.font_accel_title)
         self.speed_title.setFont(ws.font_speed_title)
-        
 
+        # grids
         self.pw_angleSpeed.addItem(GridItem())
         self.pw_accel.addItem(GridItem())
         self.pw_speed.addItem(GridItem())
 
-        #set label in each axis
-        self.pw_angleSpeed.getPlotItem().getAxis('bottom').setLabel('Time(second)')
-        self.pw_angleSpeed.getPlotItem().getAxis('left').setLabel('Degree/second')
-        self.pw_accel.getPlotItem().getAxis('bottom').setLabel('Time(second)')
-        self.pw_accel.getPlotItem().getAxis('left').setLabel('g(gravity accel)')
-        self.pw_speed.getPlotItem().getAxis('bottom').setLabel('Time(second)')
-        self.pw_speed.getPlotItem().getAxis('left').setLabel('speed(m/s)')
-        #set range in each axis
-        self.pw_angleSpeed.setYRange(-1000,1000)
-        self.pw_accel.setYRange(-20,20)
-        self.pw_speed.setYRange(-100,1000)
+        # axis labels
+        self.pw_angleSpeed.getPlotItem().getAxis('bottom').setLabel('Time (s)')
+        self.pw_angleSpeed.getPlotItem().getAxis('left').setLabel('deg/s')
+        self.pw_accel.getPlotItem().getAxis('bottom').setLabel('Time (s)')
+        self.pw_accel.getPlotItem().getAxis('left').setLabel('g')
+        self.pw_speed.getPlotItem().getAxis('bottom').setLabel('Time (s)')
+        self.pw_speed.getPlotItem().getAxis('left').setLabel('m/s')
 
-        #legend
+        # ranges
+        self.pw_angleSpeed.setYRange(-1000, 1000)
+        self.pw_accel.setYRange(-20, 20)
+        self.pw_speed.setYRange(-100, 1000)
+
+        # legends
         self.pw_angleSpeed.getPlotItem().addLegend()
         self.pw_accel.getPlotItem().addLegend()
         self.pw_speed.getPlotItem().addLegend()
 
-        self.curve_rollSpeed = self.pw_angleSpeed.plot(pen='r', name = "roll speed")
-        self.curve_pitchSpeed = self.pw_angleSpeed.plot(pen='g', name = "pitch speed")
-        self.curve_yawSpeed = self.pw_angleSpeed.plot(pen='b', name = "yaw speed")
+        # curves
+        self.curve_rollSpeed  = self.pw_angleSpeed.plot(pen='r', name="roll speed")
+        self.curve_pitchSpeed = self.pw_angleSpeed.plot(pen='g', name="pitch speed")
+        self.curve_yawSpeed   = self.pw_angleSpeed.plot(pen='b', name="yaw speed")
 
-        self.curve_xaccel = self.pw_accel.plot(pen='r', name = "x acc")
-        self.curve_yaccel = self.pw_accel.plot(pen='g', name = "y acc")
-        self.curve_zaccel = self.pw_accel.plot(pen='b', name ="z acc")
+        self.curve_xaccel = self.pw_accel.plot(pen='r', name="x acc")
+        self.curve_yaccel = self.pw_accel.plot(pen='g', name="y acc")
+        self.curve_zaccel = self.pw_accel.plot(pen='b', name="z acc")
 
-        self.curve_xspeed = self.pw_speed.plot(pen='r', name = 'x speed')
-        self.curve_yspeed = self.pw_speed.plot(pen='g', name = 'y speed')
-        self.curve_zspeed = self.pw_speed.plot(pen='b', name = 'z speed')
+        self.curve_e_speed = self.pw_speed.plot(pen='r', name='E speed (ENU)')
+        self.curve_n_speed = self.pw_speed.plot(pen='g', name='N speed (ENU)')
+        self.curve_u_speed = self.pw_speed.plot(pen='b', name='U speed (ENU)')
 
+        # buffers
+        self.tail_len = int(tail_len)
+        self.time       = np.zeros(self.tail_len)
+        self.rollSpeed  = np.zeros(self.tail_len)
+        self.pitchSpeed = np.zeros(self.tail_len)
+        self.yawSpeed   = np.zeros(self.tail_len)
+        self.xaccel     = np.zeros(self.tail_len)
+        self.yaccel     = np.zeros(self.tail_len)
+        self.zaccel     = np.zeros(self.tail_len)
+        self.espeed     = np.zeros(self.tail_len)
+        self.nspeed     = np.zeros(self.tail_len)
+        self.uspeed     = np.zeros(self.tail_len)
 
-        self.x_ran = 500
-        self.time = zeros(self.x_ran)
-        self.rollSpeed = zeros(self.x_ran)
-        self.pitchSpeed = zeros(self.x_ran)
-        self.yawSpeed = zeros(self.x_ran)
-        self.xaccel = zeros(self.x_ran)
-        self.yaccel = zeros(self.x_ran)
-        self.zaccel = zeros(self.x_ran)
-        self.xspeed = zeros(self.x_ran)
-        self.yspeed = zeros(self.x_ran)
-        self.zspeed = zeros(self.x_ran)
+        # timer (UI 스레드에서 갱신)
+        self.timer = QTimer(self.mainwindow)
+        self.timer.timeout.connect(self.update_data)
+        self.timer.start(int(update_ms))
 
-        self.starttime = 0.0
-
+    @pyqtSlot()
     def update_data(self):
-        # 1) 데이터 유무 체크: vE 기준이 가장 확실
-        n_total = len(self.datahub.vE)
-        if n_total == 0:
-            return
+        # Datahub에서 스냅샷 추출(락으로 보호)
+        with self.datahub.lock:
+            n = len(self.datahub.vE_enu)
+            if n == 0:
+                return
 
-        # 2) 타겟 길이 결정
-        win = self.x_ran
-        if n_total <= win:
-            n = n_total
+            # 필요한 배열들만 복사
+            t           = self.datahub.t.copy()
+            rollSpeeds  = self.datahub.rollSpeeds.copy()
+            pitchSpeeds = self.datahub.pitchSpeeds.copy()
+            yawSpeeds   = self.datahub.yawSpeeds.copy()
 
-            # --- 각속도 ---
-            self.rollSpeed[-n:]  = self.datahub.rollSpeeds[-n:]
-            self.pitchSpeed[-n:] = self.datahub.pitchSpeeds[-n:]
-            self.yawSpeed[-n:]   = self.datahub.yawSpeeds[-n:]
+            Xaccels = self.datahub.Xaccels.copy()
+            Yaccels = self.datahub.Yaccels.copy()
+            Zaccels = self.datahub.Zaccels.copy()
 
-            # --- 가속도 ---
-            self.xaccel[-n:] = self.datahub.Xaccels[-n:]
-            self.yaccel[-n:] = self.datahub.Yaccels[-n:]
-            self.zaccel[-n:] = self.datahub.Zaccels[-n:]
+            vE = self.datahub.vE_enu.copy()
+            vN = self.datahub.vN_enu.copy()
+            vU = self.datahub.vU_enu.copy()
 
-            # --- 속도 성분 (vE/vN/vU) ---
-            self.xspeed[-n:] = self.datahub.vE[-n:]
-            self.yspeed[-n:] = self.datahub.vN[-n:]
-            self.zspeed[-n:] = self.datahub.vU[-n:]
+            hrs  = self.datahub.hours.copy()
+            mins = self.datahub.mins.copy()
+            secs = self.datahub.secs.copy()
+            tenm = self.datahub.tenmilis.copy()
 
-            # --- 시간축 ---
-            if len(self.datahub.t) >= n:
-                self.time[-n:] = self.datahub.t[-n:]
+        L = self.tail_len
+        # 뷰 버퍼 초기화
+        self.time.fill(0.0); self.rollSpeed.fill(0.0); self.pitchSpeed.fill(0.0); self.yawSpeed.fill(0.0)
+        self.xaccel.fill(0.0); self.yaccel.fill(0.0); self.zaccel.fill(0.0)
+        self.espeed.fill(0.0); self.nspeed.fill(0.0); self.uspeed.fill(0.0)
+
+        if n <= L:
+            k = n
+            self.rollSpeed[-k:]  = rollSpeeds[-k:]
+            self.pitchSpeed[-k:] = pitchSpeeds[-k:]
+            self.yawSpeed[-k:]   = yawSpeeds[-k:]
+
+            self.xaccel[-k:] = Xaccels[-k:]
+            self.yaccel[-k:] = Yaccels[-k:]
+            self.zaccel[-k:] = Zaccels[-k:]
+
+            self.espeed[-k:] = vE[-k:]
+            self.nspeed[-k:] = vN[-k:]
+            self.uspeed[-k:] = vU[-k:]
+
+            # 시간: 누적초 t가 있으면 tail 기준 0으로 정규화
+            if len(t) >= k:
+                tt = t[-k:]
+                self.time[-k:] = tt - tt[0]
             else:
-                # 보조 계산(밀리초 → 초): /1000.0
-                hours  = self.datahub.hours[-n:] * 3600.0
-                minutes= self.datahub.mins[-n:]  * 60.0
-                seconds= self.datahub.secs[-n:]
-                millis = self.datahub.tenmilis[-n:] / 100.0
-                t_abs = hours + minutes + seconds + millis
-                t0 = (self.datahub.hours[0]*3600.0 + self.datahub.mins[0]*60.0
-                    + self.datahub.secs[0] + self.datahub.tenmilis[0]/100.0)
-                self.time[-n:] = t_abs - t0
-
+                t_abs = hrs[-k:]*3600.0 + mins[-k:]*60.0 + secs[-k:] + tenm[-k:]/100.0
+                self.time[-k:] = t_abs - t_abs[0]
         else:
-            # 최근 win개만 표시
-            s = -win
+            s = -L
+            self.rollSpeed[:]  = rollSpeeds[s:]
+            self.pitchSpeed[:] = pitchSpeeds[s:]
+            self.yawSpeed[:]   = yawSpeeds[s:]
 
-            # --- 각속도 ---
-            self.rollSpeed[:]  = self.datahub.rollSpeeds[s:]
-            self.pitchSpeed[:] = self.datahub.pitchSpeeds[s:]
-            self.yawSpeed[:]   = self.datahub.yawSpeeds[s:]
+            self.xaccel[:] = Xaccels[s:]
+            self.yaccel[:] = Yaccels[s:]
+            self.zaccel[:] = Zaccels[s:]
 
-            # --- 가속도 ---
-            self.xaccel[:] = self.datahub.Xaccels[s:]
-            self.yaccel[:] = self.datahub.Yaccels[s:]
-            self.zaccel[:] = self.datahub.Zaccels[s:]
+            self.espeed[:] = vE[s:]
+            self.nspeed[:] = vN[s:]
+            self.uspeed[:] = vU[s:]
 
-            # --- 속도 성분 ---
-            self.xspeed[:] = self.datahub.vE[s:]
-            self.yspeed[:] = self.datahub.vN[s:]
-            self.zspeed[:] = self.datahub.vU[s:]
-
-            # --- 시간축 ---
-            if len(self.datahub.t) >= win:
-                self.time[:] = self.datahub.t[s:]
+            if len(t) >= L:
+                tt = t[s:]
+                self.time[:] = tt - tt[0]
             else:
-                hours  = self.datahub.hours[s:] * 3600.0
-                minutes= self.datahub.mins[s:]  * 60.0
-                seconds= self.datahub.secs[s:]
-                millis = self.datahub.tenmilis[s:] / 100.0
-                t_abs = hours + minutes + seconds + millis
-                # 윈도 첫 샘플 기준 0
+                t_abs = hrs[s:]*3600.0 + mins[s:]*60.0 + secs[s:] + tenm[s:]/100.0
                 self.time[:] = t_abs - t_abs[0]
 
-        # 3) 그래프 업데이트
+        # 그리기
         self.curve_rollSpeed.setData(x=self.time, y=self.rollSpeed)
         self.curve_pitchSpeed.setData(x=self.time, y=self.pitchSpeed)
         self.curve_yawSpeed.setData(x=self.time, y=self.yawSpeed)
@@ -211,66 +221,48 @@ class GraphViewer_Thread(QThread):
         self.curve_yaccel.setData(x=self.time, y=self.yaccel)
         self.curve_zaccel.setData(x=self.time, y=self.zaccel)
 
-        self.curve_xspeed.setData(x=self.time, y=self.xspeed)
-        self.curve_yspeed.setData(x=self.time, y=self.yspeed)
-        self.curve_zspeed.setData(x=self.time, y=self.zspeed)
+        self.curve_e_speed.setData(x=self.time, y=self.espeed)
+        self.curve_n_speed.setData(x=self.time, y=self.nspeed)
+        self.curve_u_speed.setData(x=self.time, y=self.uspeed)
 
     def graph_clear(self):
+        for arr in (self.time, self.rollSpeed, self.pitchSpeed, self.yawSpeed,
+                    self.xaccel, self.yaccel, self.zaccel, self.espeed, self.nspeed, self.uspeed):
+            arr.fill(0.0)
 
-        self.time = zeros(self.x_ran)
-        self.rollSpeed = zeros(self.x_ran)
-        self.pitchSpeed = zeros(self.x_ran)
-        self.yawSpeed = zeros(self.x_ran)
-        self.xaccel = zeros(self.x_ran)
-        self.yaccel = zeros(self.x_ran)
-        self.zaccel = zeros(self.x_ran)
-
-        self.curve_rollSpeed.clear()
-        self.curve_pitchSpeed.clear()
-        self.curve_yawSpeed.clear()
-
-        self.curve_xaccel.clear()
-        self.curve_yaccel.clear()
-        self.curve_zaccel.clear()
-                
-        self.curve_xspeed.clear()
-        self.curve_yspeed.clear()
-        self.curve_zspeed.clear()
+        self.curve_rollSpeed.clear(); self.curve_pitchSpeed.clear(); self.curve_yawSpeed.clear()
+        self.curve_xaccel.clear();    self.curve_yaccel.clear();    self.curve_zaccel.clear()
+        self.curve_e_speed.clear();   self.curve_n_speed.clear();   self.curve_u_speed.clear()
 
 class RealTimeENUPlot(QThread):
     def __init__(self, mainwindow, datahub,
                  tail_len: int = 2000,
                  update_ms: int = 50,
                  vel_scale: float = 0.2):
-        
         super().__init__()
 
         self.QVector3D = QVector3D
         self.mainwindow = mainwindow
         self.datahub = datahub
-        self.tail_len = tail_len
-        self.update_ms = update_ms
-        self.vel_scale = vel_scale
+        self.tail_len = int(tail_len)
+        self.update_ms = int(update_ms)
+        self.vel_scale = float(vel_scale)
 
-        # 내부 버퍼
+        # 내부 버퍼 (ENU만)
         from collections import deque
-        self.E_hist = deque(maxlen=tail_len)
-        self.N_hist = deque(maxlen=tail_len)
-        self.U_hist = deque(maxlen=tail_len)
+        self.E_hist = deque(maxlen=self.tail_len)
+        self.N_hist = deque(maxlen=self.tail_len)
+        self.U_hist = deque(maxlen=self.tail_len)
         self._last_count = 0
-        self._ref_lla = None
-        self._ref_ecef = None
-        self._input_mode = "auto"  # "auto" | "enu" | "ecef"
 
-        # 뷰/아이템 (UI 스레드에서 생성)
+        # 뷰/아이템
         self.trajectory_title = QLabel(self.mainwindow.container)
-        self.trajectory_title.setText("<b>&#8226; Trajectory</b>")
+        self.trajectory_title.setText("<b>&#8226; Trajectory (ENU)</b>")
         self.trajectory_title.setStyleSheet("color: white;")
         self.trajectory_title.setFont(ws.font_trajectory_title)
-        self.trajectory_title.setGeometry(*ws.trajectory_title_geometry)   
+        self.trajectory_title.setGeometry(*ws.trajectory_title_geometry)
 
         self.view = gl.GLViewWidget(self.mainwindow.container)
-        geom = getattr(ws, "enu3d_geometry", ws.pw_trajectory_geometry)
         self.view.setGeometry(*ws.pw_trajectory_geometry)
         self.view.setWindowTitle("Trajectory")
         self.view.setCameraPosition(distance=50)
@@ -283,218 +275,62 @@ class RealTimeENUPlot(QThread):
         self.vel_item = gl.GLLinePlotItem(pos=np.zeros((2, 3)), width=3, antialias=True)
         self.view.addItem(self.vel_item)
 
-        self._add_legend()  # ENU RGB legend overlay
+        self._add_legend()
 
-        # UI 스레드 타이머로 갱신(안전)
+        # 갱신 타이머
         self.timer = QTimer(self.mainwindow)
         self.timer.timeout.connect(self._update_plot)
-        self.timer.start(update_ms)
+        self.timer.start(self.update_ms)
 
-        self.keep_all = True          # 전체 궤적 유지 (False면 기존 tail만 그림)
-        self.max_draw_pts = 20000     # 그릴 때 최대 포인트 수 (성능 보호용)
+        # 옵션
+        self.keep_all = True
+        self.max_draw_pts = 20000
 
-        # 전체 궤적 누적 리스트
-        self.E_all = []
-        self.N_all = []
-        self.U_all = []
+        self.E_all, self.N_all, self.U_all = [], [], []
 
-    # ---------- 좌표 변환 ----------
-    @staticmethod
-    def _lla_to_ecef(lat_deg, lon_deg, h_m):
-        a = 6378137.0; f = 1/298.257223563; e2 = f*(2-f)
-        lat = np.deg2rad(lat_deg); lon = np.deg2rad(lon_deg)
-        sl, cl = np.sin(lat), np.cos(lat)
-        so, co = np.sin(lon), np.cos(lon)
-        N = a/np.sqrt(1 - e2*sl*sl)
-        x = (N+h_m)*cl*co; y = (N+h_m)*cl*so; z = (N*(1-e2)+h_m)*sl
-        return np.array([x, y, z], float)
+    # ---------------- ENU 전용 스냅샷/그리기 ---------------- #
 
-    @staticmethod
-    def _ecef_to_enu(xyz, ref_ecef, ref_lat_deg, ref_lon_deg):
-        lat = np.deg2rad(ref_lat_deg); lon = np.deg2rad(ref_lon_deg)
-        sl, cl = np.sin(lat), np.cos(lat)
-        so, co = np.sin(lon), np.cos(lon)
-        dx, dy, dz = xyz - ref_ecef
-        T = np.array([[-so,          co,         0],
-                      [-sl*co,   -sl*so,        cl],
-                      [ cl*co,    cl*so,        sl]])
-        return T @ np.array([dx, dy, dz])
-    
-    @staticmethod
-    def _ecef_to_lla(x, y, z):
-        a = 6378137.0
-        f = 1/298.257223563
-        e2 = f*(2-f)
-        b = a*(1-f)
-        ep2 = (a*a - b*b) / (b*b)
-
-        r = np.hypot(x, y)
-        if r < 1e-9:
-            # Pole
-            lat = np.sign(z) * np.pi/2
-            lon = 0.0
-            h = abs(z) - b
-            return np.rad2deg(lat), np.rad2deg(lon), h
-
-        lon = np.arctan2(y, x)
-
-        # Initial parametric latitude
-        theta = np.arctan2(z * a, r * b)
-        st, ct = np.sin(theta), np.cos(theta)
-
-        lat = np.arctan2(z + ep2 * b * st*st*st,
-                         r - e2 * a * ct*ct*ct)
-
-        sl, cl = np.sin(lat), np.cos(lat)
-        N = a / np.sqrt(1 - e2 * sl*sl)
-        h = r/np.cos(lat) - N
-
-        # One Bowring correction (usually enough)
-        lat_prev = lat
-        N = a / np.sqrt(1 - e2 * np.sin(lat_prev)**2)
-        h = r/np.cos(lat_prev) - N
-        lat = np.arctan2(z, r*(1 - e2*N/(N+h)))
-
-        return float(np.rad2deg(lat)), float(np.rad2deg(lon)), float(h)
-    @staticmethod
-    def _ecef_vec_to_enu(vec_xyz, ref_lat_deg, ref_lon_deg):
-        lat = np.deg2rad(ref_lat_deg); lon = np.deg2rad(ref_lon_deg)
-        sl, cl = np.sin(lat), np.cos(lat)
-        so, co = np.sin(lon), np.cos(lon)
-        T = np.array([[-so,        co,       0],
-                    [-sl*co,  -sl*so,     cl],
-                    [ cl*co,   cl*so,     sl]])
-        return T @ np.asarray(vec_xyz, dtype=float)
-    
-    def _has_hub_enu(self):
-        return (hasattr(self.datahub, 'e_enu') and hasattr(self.datahub, 'n_enu') and hasattr(self.datahub, 'u_enu')
-                and len(self.datahub.e_enu) > 0 and len(self.datahub.n_enu) > 0 and len(self.datahub.u_enu) > 0)
-
-    def _has_hub_enu_vel(self):
-        return (hasattr(self.datahub, 'vE_enu') and hasattr(self.datahub, 'vN_enu') and hasattr(self.datahub, 'vU_enu')
-                and len(self.datahub.vE_enu) > 0 and len(self.datahub.vN_enu) > 0 and len(self.datahub.vU_enu) > 0)
-
-    def _ensure_ref_from_datahub(self):
-        if self._ref_lla is not None and self._ref_ecef is not None:
-            return
-
-        if all(hasattr(self.datahub, n) for n in ('Easts','Norths','Ups')) and len(self.datahub.Easts) > 0:
-            x0 = float(self.datahub.Easts[0]); y0 = float(self.datahub.Norths[0]); z0 = float(self.datahub.Ups[0])
-            lat0, lon0, h0 = self._ecef_to_lla(x0, y0, z0)
-            self._ref_lla = (lat0, lon0, h0)
-            self._ref_ecef = np.array([x0, y0, z0], dtype=float)
-            return
-
-        self._ref_lla = None
-        self._ref_ecef = None
-    
-    def _detect_input_mode(self):
-        # 1순위: Datahub가 ENU를 이미 제공
-        if self._has_hub_enu():
-            return "hub_enu"
-
-        # 2순위: Easts/Norths/Ups 가 ENU인지/ECEF인지 추정
-        if not all(hasattr(self.datahub, n) for n in ('Easts','Norths','Ups')) or len(self.datahub.Easts) == 0:
-            return "unknown"
-        try:
-            x = float(self.datahub.Easts[0]); y = float(self.datahub.Norths[0]); z = float(self.datahub.Ups[0])
-            norm = np.sqrt(x*x + y*y + z*z)
-            return "ecef" if norm > 1.0e6 else "enu"
-        except Exception:
-            return "unknown"
-        
-    def _available_count(self):
-        # hub ENU가 있으면 그 길이에 맞춘다
-        if self._has_hub_enu():
-            return min(len(self.datahub.e_enu), len(self.datahub.n_enu), len(self.datahub.u_enu))
-        # 없으면 기존 Easts/Norths/Ups
-        if all(hasattr(self.datahub, n) for n in ('Easts','Norths','Ups')):
-            return min(len(self.datahub.Easts), len(self.datahub.Norths), len(self.datahub.Ups))
-        return 0
-
-    def _get_dt(self, idx):
-        try:
-            h, m, s = float(self.datahub.hours[idx]), float(self.datahub.mins[idx]), float(self.datahub.secs[idx])
-            tm = float(self.datahub.tenmilis[idx])*0.01
-            h0, m0, s0 = float(self.datahub.hours[idx-1]), float(self.datahub.mins[idx-1]), float(self.datahub.secs[idx-1])
-            tm0 = float(self.datahub.tenmilis[idx-1])*0.01
-            return (h*3600+m*60+s+tm) - (h0*3600+m0*60+s0+tm0)
-        except Exception:
-            return None
-
-    def _get_velocity_sample(self, idx, fallback_from_pos=None):
-        # 1) hub ENU 속도 있으면 그대로 사용
-        if self._has_hub_enu_vel():
-            try:
-                return (float(self.datahub.vE_enu[idx]),
-                        float(self.datahub.vN_enu[idx]),
-                        float(self.datahub.vU_enu[idx]))
-            except Exception:
-                pass
-
-        # 2) 포지션 ENU로부터 미분
-        if fallback_from_pos is not None and idx >= 1:
-            (E, N, U) = fallback_from_pos[idx]; (E0, N0, U0) = fallback_from_pos[idx-1]
-            dt = self._get_dt(idx)
-            if dt and dt > 1e-6:
-                return ((E-E0)/dt, (N-N0)/dt, (U-U0)/dt)
-
-        # 3) 최후: 0
-        return (0.0, 0.0, 0.0)
+    def _available_count(self) -> int:
+        # ENU가 하나도 없으면 0
+        return min(len(self.datahub.e_enu),
+                   len(self.datahub.n_enu),
+                   len(self.datahub.u_enu))
 
     def _pull_new_samples(self):
         total = self._available_count()
         if total <= self._last_count:
             return None
 
-        # 모드 결정
-        if self._input_mode == "auto":
-            self._input_mode = self._detect_input_mode()
+        # Datahub에서 ENU 위치/속도 스냅샷 (스레드 세이프)
+        with self.datahub.lock:
+            e = self.datahub.e_enu.copy()
+            n = self.datahub.n_enu.copy()
+            u = self.datahub.u_enu.copy()
+            vE = self.datahub.vE_enu.copy()
+            vN = self.datahub.vN_enu.copy()
+            vU = self.datahub.vU_enu.copy()
 
-        idxs = range(self._last_count, total)
-        self.ENU = []
-
-        # A) Datahub가 ENU 제공 (권장 경로)
-        if self._input_mode == "hub_enu":
-            for i in idxs:
-                self.ENU.append((float(self.datahub.e_enu[i]),
-                                float(self.datahub.n_enu[i]),
-                                float(self.datahub.u_enu[i])))
-
-        # B) 사용자가 ENU 직접 공급 (레거시)
-        elif self._input_mode == "enu":
-            for i in idxs:
-                self.ENU.append((float(self.datahub.Easts[i]),
-                                float(self.datahub.Norths[i]),
-                                float(self.datahub.Ups[i])))
-
-        # C) ECEF → ENU 변환 (폴백)
-        elif self._input_mode == "ecef":
-            self._ensure_ref_from_datahub()
-            if self._ref_lla is None or self._ref_ecef is None:
-                return None
-            lat0, lon0, _ = self._ref_lla
-            for i in idxs:
-                x = float(self.datahub.Easts[i]); y = float(self.datahub.Norths[i]); z = float(self.datahub.Ups[i])
-                e, n, u = self._ecef_to_enu(np.array([x, y, z], float), self._ref_ecef, lat0, lon0)
-                self.ENU.append((e, n, u))
-        else:
-            return None
-
-        # 버퍼 적재 (tail & all)
-        for E, N, U in self.ENU:
-            self.E_hist.append(E); self.N_hist.append(N); self.U_hist.append(U)
+        # 새로 들어온 부분만 적재
+        s = self._last_count
+        for Ei, Ni, Ui in zip(e[s:], n[s:], u[s:]):
+            self.E_hist.append(float(Ei))
+            self.N_hist.append(float(Ni))
+            self.U_hist.append(float(Ui))
             if self.keep_all:
-                self.E_all.append(E); self.N_all.append(N); self.U_all.append(U)
+                self.E_all.append(float(Ei))
+                self.N_all.append(float(Ni))
+                self.U_all.append(float(Ui))
 
-        # 속도
-        last_idx = total - 1
-        vE, vN, vU = self._get_velocity_sample(last_idx, fallback_from_pos=self.ENU)
+        # 진행방향(속도)은 마지막 샘플을 사용
+        vE_last = float(vE[-1]) if len(vE) else 0.0
+        vN_last = float(vN[-1]) if len(vN) else 0.0
+        vU_last = float(vU[-1]) if len(vU) else 0.0
 
         self._last_count = total
-        return (vE, vN, vU)
-    
+        return (vE_last, vN_last, vU_last)
+
     def _prepare_pos(self):
+        # 전체 유지 or tail
         if self.keep_all and len(self.E_all) >= 2:
             e = np.asarray(self.E_all, dtype=float)
             n = np.asarray(self.N_all, dtype=float)
@@ -506,6 +342,7 @@ class RealTimeENUPlot(QThread):
             n = np.asarray(self.N_hist, dtype=float)
             u = np.asarray(self.U_hist, dtype=float)
 
+        # 다운샘플링(성능 보호)
         L = e.shape[0]
         if L > self.max_draw_pts:
             step = int(np.ceil(L / self.max_draw_pts))
@@ -520,18 +357,8 @@ class RealTimeENUPlot(QThread):
         z_axis = gl.GLLinePlotItem(pos=np.array([[0,0,0],[0,0,10]]), color=(0,0,1,1), width=2, antialias=True)
         self.view.addItem(x_axis); self.view.addItem(y_axis); self.view.addItem(z_axis)
 
-    def _autoscale_camera(self):
-        if len(self.E_hist) < 2: return
-        e = np.array(self.E_hist); n = np.array(self.N_hist); u = np.array(self.U_hist)
-        e_mid = (e.min()+e.max())/2.0; n_mid = (n.min()+n.max())/2.0; u_mid = (u.min()+u.max())/2.0
-        max_range = max(e.max()-e.min(), n.max()-n.min(), u.max()-u.min())
-        dist = max(20.0, max_range*1.5)
-        self.view.opts['center'] = self.QVector3D(float(e_mid), float(n_mid), float(u_mid))
-        self.view.setCameraPosition(distance=dist)
-
     def _autoscale_camera_with(self, pos):
-        if pos is None or len(pos) < 2:
-            return
+        if pos is None or len(pos) < 2: return
         e, n, u = pos[:,0], pos[:,1], pos[:,2]
         e_mid = (e.min()+e.max())/2.0
         n_mid = (n.min()+n.max())/2.0
@@ -551,53 +378,46 @@ class RealTimeENUPlot(QThread):
         if pos is None:
             return
 
+        # 궤적/머리 위치
         if len(pos) >= 2:
             self.traj_item.setData(pos=pos)
 
         head = pos[-1].reshape(1,3)
         self.head_item.setData(pos=head)
 
+        # 진행방향(속도 벡터) : ENU 속도 * 스케일
         vel_end = head[0] + np.array([vE, vN, vU]) * self.vel_scale
         self.vel_item.setData(pos=np.vstack([head[0], vel_end]))
 
-        # 변경: pos 기반 오토스케일
+        # 오토스케일
         self._autoscale_camera_with(pos)
 
     def _add_legend(self):
-        # GLViewWidget 위치 기준으로 좌상단에 작게 띄우기
-        vx, vy, vw, vh = ws.pw_trajectory_geometry  # (x, y, w, h)
+        vx, vy, vw, vh = ws.pw_trajectory_geometry
         pad = 10
         box_w, box_h = 140, 80
 
         self.legend_bg = QFrame(self.mainwindow.container)
         self.legend_bg.setGeometry(vx + pad, vy + pad, box_w, box_h)
         self.legend_bg.setStyleSheet("""
-            QFrame {
-                background-color: rgba(0,0,0,160);
-                border-radius: 8px;
-            }
+            QFrame { background-color: rgba(0,0,0,160); border-radius: 8px; }
         """)
-        # 마우스 이벤트 투과 (씬 회전/줌 방해 X)
         self.legend_bg.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.legend_bg.show()
 
         def add_row(y, rgb, text):
             r, g, b = rgb
-            sw = QFrame(self.legend_bg)
-            sw.setGeometry(10, y, 16, 16)
+            sw = QFrame(self.legend_bg); sw.setGeometry(10, y, 16, 16)
             sw.setStyleSheet(f"background-color: rgb({r},{g},{b}); border: 1px solid rgba(255,255,255,140); border-radius: 3px;")
-
-            lb = QLabel(text, self.legend_bg)
-            lb.setGeometry(34, y-2, box_w-44, 20)
+            lb = QLabel(text, self.legend_bg); lb.setGeometry(34, y-2, box_w-44, 20)
             lb.setStyleSheet("color: white;")
 
-        # ENU with RGB
-        add_row(12, (255,   0,   0), "E (East)  — Red")
-        add_row(34, (  0, 255,   0), "N (North) — Green")
-        add_row(56, (  0,   0, 255), "U (Up)    — Blue")
+        add_row(12, (255,  0,  0), "E (East)  — Red")
+        add_row(34, (  0,255,  0), "N (North) — Green")
+        add_row(56, (  0,  0,255), "U (Up)    — Blue")
 
+    # 리셋들
     def trajectory_clear(self):
-        # tail deque만 비우고, last_count 초기화 (다음 프레임부터 새로 들어온 것만 tail에 채움)
         try:
             self.E_hist.clear(); self.N_hist.clear(); self.U_hist.clear()
         except Exception:
@@ -607,14 +427,12 @@ class RealTimeENUPlot(QThread):
             self.U_hist = deque(maxlen=self.tail_len)
 
         self._last_count = 0
-        # 보기 객체 초기화
         try: self.traj_item.setData(pos=np.zeros((2, 3)))
         except: pass
         try: self.head_item.setData(pos=np.array([[0.0, 0.0, 0.0]]))
         except: pass
         try: self.vel_item.setData(pos=np.zeros((2, 3)))
         except: pass
-        # 카메라 리셋은 유지/선택
         try:
             self.view.opts['center'] = self.QVector3D(0.0, 0.0, 0.0)
             self.view.setCameraPosition(distance=50)
@@ -623,20 +441,15 @@ class RealTimeENUPlot(QThread):
     def trajectory_hard_reset(self):
         self.trajectory_clear()
         self.E_all.clear(); self.N_all.clear(); self.U_all.clear()
-        self._ref_lla = None; self._ref_ecef = None
-        self._input_mode = "auto"
 
     # QThread 수명주기
     def run(self):
-        self.exec_()   # 별도 타이머는 없지만, 일관성 있게 스레드 루프 유지
+        self.exec_()
 
     def stop(self):
-        try:
-            self.timer.stop()
-        except Exception:
-            pass
-        self.quit()
-        self.wait(1000)
+        try: self.timer.stop()
+        except: pass
+        self.quit(); self.wait(1000)
 
 class MapViewer_Thread(QThread):
     def __init__(self, mainwindow, datahub):
@@ -842,76 +655,58 @@ class RocketViewer_Thread(QThread):
 
     def load_and_display_obj(self, filename):
         vertices, faces = self.load_obj(filename)
-
-        # 로켓의 중심 계산
         centroid = np.mean(vertices, axis=0)
-
-        # 중앙에 위치시키기 위해 로켓 메쉬를 원점으로 이동
-        mesh = gl.GLMeshItem(vertexes=vertices, faces=faces, drawEdges=True, edgeColor=(1, 1, 1, 1), smooth=False)
+        mesh = gl.GLMeshItem(vertexes=vertices, faces=faces, drawEdges=True,
+                             edgeColor=(1, 1, 1, 1), smooth=False)
         mesh.translate(-centroid[0], -centroid[1], -centroid[2])
-
-
         return mesh
 
     def load_obj(self, filename):
-        vertices = []
-        faces = []
+        vertices, faces = [], []
         with open(filename, 'r') as f:
             for line in f:
-                if line.startswith('v '):  # Vertex 데이터
+                if line.startswith('v '):
                     vertices.append(list(map(float, line.strip().split()[1:])))
-                elif line.startswith('f '):  # Face 데이터
+                elif line.startswith('f '):
                     face = [int(part.split('/')[0]) - 1 for part in line.strip().split()[1:]]
                     faces.append(face)
         return np.array(vertices), np.array(faces)
 
     def update_pose(self):
         def _last(arr, default=np.nan):
-            try:
-                return float(arr[-1]) if len(arr) > 0 else float(default)
-            except Exception:
-                return float(default)
+            with self.datahub.lock:  # 락 보호
+                try:
+                    return float(arr[-1]) if len(arr) > 0 else float(default)
+                except Exception:
+                    return float(default)
 
         def _fmt(val, suffix=""):
             return f"{val:.2f}{suffix}" if np.isfinite(val) else "N/A"
 
-        # 1) 오리엔테이션: Datahub가 이미 ENU 기준 Z–X–Y(roll=z, pitch=x, yaw=y)로 계산해둠
+        # 1) 오리엔테이션: Datahub가 이미 ENU 기준 Z–X–Y 오일러 제공
         roll_z  = _last(self.datahub.rolls)   # deg
         pitch_x = _last(self.datahub.pitchs)  # deg
         yaw_y   = _last(self.datahub.yaws)    # deg
 
         self.rocket_mesh.resetTransform()
-        # 적용 순서/축: Z(roll) → X(pitch) → Y(yaw)
-        self.rocket_mesh.rotate(roll_z,  0, 0, 1)  # roll about Z
-        self.rocket_mesh.rotate(pitch_x, 1, 0, 0)  # pitch about X
-        self.rocket_mesh.rotate(yaw_y,   0, 1, 0)  # yaw about Y
+        self.rocket_mesh.rotate(roll_z,  0, 0, 1)  # Z roll
+        self.rocket_mesh.rotate(pitch_x, 1, 0, 0)  # X pitch
+        self.rocket_mesh.rotate(yaw_y,   0, 1, 0)  # Y yaw
 
-        # 2) 속도: 있으면 v*_enu 사용(크기는 좌표계와 무관하지만 일관성 위해 ENU 우선)
-        if hasattr(self.datahub, 'vE_enu') and len(self.datahub.vE_enu) > 0:
-            vE = _last(self.datahub.vE_enu)
-            vN = _last(self.datahub.vN_enu)
-            vU = _last(self.datahub.vU_enu)
-            spd = (vE**2 + vN**2 + vU**2) ** 0.5
-        elif len(self.datahub.speed) > 0:
-            spd = _last(self.datahub.speed)
-        else:
-            # ECEF 속도로 대체
-            vE = _last(self.datahub.vE)
-            vN = _last(self.datahub.vN)
-            vU = _last(self.datahub.vU)
-            spd = (vE**2 + vN**2 + vU**2) ** 0.5
-
+        # 2) 속도: Datahub.speed (ENU 기반) 바로 사용
+        spd = _last(self.datahub.speed)
         self.speed_label.setText(f"Speed {_fmt(spd,'m/s')}")
 
+        # 3) 고도 (ENU U값)
         alt = _last(self.datahub.u_enu)
         self.altitude_label.setText(f"Altitude {_fmt(alt,'m')}")
 
-        # 4) 각도 레이블(이미 deg): Datahub 계산값 그대로 사용
+        # 4) 각도 레이블
         self.roll_label.setText(f"Roll : {_fmt(roll_z,'°')}")
         self.pitch_label.setText(f"Pitch : {_fmt(pitch_x,'°')}")
         self.yaw_label.setText(f"Yaw : {_fmt(yaw_y,'°')}")
 
-        # 5) 각속도/가속도
+        # 5) 각속도/가속도 (rad/s, m/s²)
         self.rollspeed_label.setText(f"Roll_speed : {_fmt(_last(self.datahub.rollSpeeds),'Rad/s')}")
         self.pitchspeed_label.setText(f"Pitch_speed : {_fmt(_last(self.datahub.pitchSpeeds),'Rad/s')}")
         self.yawspeed_label.setText(f"Yaw_speed : {_fmt(_last(self.datahub.yawSpeeds),'Rad/s')}")
@@ -920,31 +715,22 @@ class RocketViewer_Thread(QThread):
         self.yacc_label.setText(f"Y_acc : {_fmt(_last(self.datahub.Yaccels),'m/s²')}")
         self.zacc_label.setText(f"Z_acc : {_fmt(_last(self.datahub.Zaccels),'m/s²')}")
 
-
     def data_label_clear(self):
         """모든 데이터 레이블을 초기 상태로 리셋"""
-        # 속도/고도
         self.speed_label.setText("Speed 0.00 m/s")
         self.altitude_label.setText("Altitude 0.00 m")
-
-        # 오일러 각
         self.roll_label.setText("Roll : 0.00°")
         self.pitch_label.setText("Pitch : 0.00°")
         self.yaw_label.setText("Yaw : 0.00°")
-
-        # 각속도
         self.rollspeed_label.setText("Roll_speed : 0.00 Rad/s")
         self.pitchspeed_label.setText("Pitch_speed : 0.00 Rad/s")
         self.yawspeed_label.setText("Yaw_speed : 0.00 Rad/s")
-
-        # 가속도
         self.xacc_label.setText("X_acc : 0.00 m/s²")
         self.yacc_label.setText("Y_acc : 0.00 m/s²")
         self.zacc_label.setText("Z_acc : 0.00 m/s²")
 
-
     def run(self):
-        self.exec_()  # QThread에서 이벤트 루프를 실행
+        self.exec_()
 
 class MainWindow(PageWindow):
     def __init__(self, datahub):
