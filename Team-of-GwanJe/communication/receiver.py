@@ -13,6 +13,14 @@ BODY_SIZE = calcsize(FMT_BODY)                  # 69
 HEADER_SIZE = 3                                 # 'A','B', len
 PACKET_SIZE = HEADER_SIZE + BODY_SIZE + 1       # + 'Z' = 73
 
+#패킷 'A', 'B', len, h, m, s, ms, 
+#     ECEF_x, ECEF_y, ECEF_z, 
+#     V_E, V_N, V_U, 
+#     a_p, a_y, a_r, 
+#     q0, q1, q2, q3, 
+#     w_p, w_y, w_r, 
+#     checksum, 'Z'
+
 class Receiver(Thread):
     def __init__(self, datahub):
         super().__init__(daemon=True)

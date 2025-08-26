@@ -275,7 +275,7 @@ class Sender(Thread):
 if __name__ == "__main__":
     # 간이 테스트: datahub 흉내
     class Dummy:
-        mySendSerialPort = "COM11"
+        mySendSerialPort = "COM15"
         mySendBaudrate   = "115200"
         iscommunication_start = True
 
