@@ -1403,38 +1403,39 @@ class CSVPlayer(QThread):
         self._paused = False
 
         # 시간 처리용 내부 상태
-        self._ten_div = 100.0   # tenmilis 스케일(기본 10ms → /100, ms면 /1000 로 자동 감지)
+        self._ten_div = 100.0   # tenmilis 스케일(기본 10ms → /100, ms면 /1000)
         self._epoch = None
         self._prev_raw = None
         self._t0 = None
 
+        # 성능 튜닝 파라미터
+        self._BATCH  = 200      # 샘플 N개마다 묶음 반영
+        self._UI_FPS = 30.0     # UI 갱신 최대 FPS
+
     def stop(self):
         self._running = False
+        # pause 루프에서 즉시 빠져나오도록
+        self._paused = False
 
     def pause(self, yes=True):
-        self._paused = yes
+        self._paused = bool(yes)
 
     def _abs_time_val(self, h, m, s, ten):
-        """(h,m,s,ten) → 초 단위 절대시간(당일 기준). self._ten_div 로 스케일."""
         return h*3600.0 + m*60.0 + s + ten/self._ten_div
 
     def _abs_time_row(self, row):
-        """row(list[float]): 0..3 에 시간열 가정"""
         h, m, s, ten = row[0], row[1], row[2], row[3]
         return self._abs_time_val(h, m, s, ten)
 
     def _decide_ten_div(self, cleaned):
-        """tenmilis 스케일 자동 판별: 값이 120 이상 자주 나오면 ms(0..999)로 간주."""
         try:
-            ten_vals = [r[3] for r in cleaned]
-            ten_max = max(ten_vals)
-            # 120 넘으면 ms라고 가정(여유 있는 컷오프)
+            ten_max = max(r[3] for r in cleaned)
             self._ten_div = 1000.0 if ten_max > 120.0 else 100.0
         except Exception:
             self._ten_div = 100.0
 
-    def _feed_monotonic_time(self, h, m, s, ten):
-        """단조증가 시간 t를 계산하여 datahub.t 에 append."""
+    def _feed_monotonic_time_to_buf(self, h, m, s, ten, buf_t):
+        """단조 증가 시간 t를 계산해 버퍼에만 push."""
         raw = self._abs_time_val(h, m, s, ten)
 
         if self._epoch is None:
@@ -1442,90 +1443,109 @@ class CSVPlayer(QThread):
             self._prev_raw = raw
             self._t0 = raw
 
-        # 시계가 뒤로 감긴 경우(epoch 보정)
+        # 시계가 뒤로 감기면 epoch로 이어붙임
         if raw < self._prev_raw - 0.2:
             drop = self._prev_raw - raw
-            if drop > 3600.0:
-                # 큰 폭 드롭(예: 자정 등) → 하루 붙이기
-                self._epoch += 24*3600.0
-            else:
-                # 소폭 드롭 → 떨어진 만큼 이어붙이기
-                self._epoch += drop
+            self._epoch += 24*3600.0 if drop > 3600.0 else drop
 
         self._prev_raw = raw
         t_mono = (raw - self._t0) + self._epoch
-
-        # datahub.t 에 단조 시간 주입
-        try:
-            self.datahub.t = np.append(self.datahub.t, float(t_mono))
-        except AttributeError:
-            self.datahub.t = np.array([float(t_mono)], dtype=float)
+        buf_t.append(float(t_mono))
 
     def run(self):
-        # 헤더 유무에 상관없이 20열로 강제 매핑
         try:
-            df = pd.read_csv(self.csv_path, header=None, names=COLUMN_NAMES, dtype=str)
-        except Exception as e:
-            print(f"[CSVPlayer] CSV load error: {e}")
-            return
-
-        # 전처리: 공백/NaN 제거 + 숫자 캐스팅 + 열 개수 보정
-        cleaned = []
-        for i, row in enumerate(df.itertuples(index=False, name=None)):
-            if len(row) < len(COLUMN_NAMES):
-                continue
+            # 1) CSV 로드 (헤더 유무와 무관하게 20열 강제 매핑)
             try:
-                vals = [float(x) for x in row[:len(COLUMN_NAMES)]]
-            except Exception:
-                continue
-            cleaned.append(vals)
-
-        if not cleaned:
-            print("[CSVPlayer] no valid rows after cleaning")
-            return
-
-        # (1) tenmilis 스케일 자동 판별
-        self._decide_ten_div(cleaned)
-
-        # (2) 절대시간 기준 정렬 (시계 점프가 있어도 기본 순서 안정화)
-        cleaned.sort(key=self._abs_time_row)
-
-        # 재생 루프
-        dt = 1.0 / max(1e-3, self.hz)
-        next_t = time.perf_counter()
-
-        for vals in cleaned:
-            if not self._running:
-                break
-
-            while self._paused and self._running:
-                time.sleep(0.05)
-
-            # (3) 단조시간 생성 → datahub.t 에 먼저 공급
-            try:
-                h, m, s, ten = vals[0], vals[1], vals[2], vals[3]
-                self._feed_monotonic_time(h, m, s, ten)
+                df = pd.read_csv(self.csv_path, header=None, names=COLUMN_NAMES, dtype=str)
             except Exception as e:
-                # 시간계산 실패해도 데이터는 계속 흘려보내기
-                print(f"[CSVPlayer] time gen error: {e}")
+                import traceback
+                print("[CSVPlayer] FATAL while reading CSV:", e)
+                traceback.print_exc()
+                return
 
-            # (4) 데이터 업데이트
-            try:
-                self.datahub.update_from_row(vals)
-            except Exception as e:
-                print(f"[CSVPlayer] row error: {e}")
-                # 이 샘플은 스킵하되 재생은 계속
-                continue
+            # 2) 전처리: 숫자 캐스팅 & 열 개수 보정
+            cleaned = []
+            for row in df.itertuples(index=False, name=None):
+                if len(row) < len(COLUMN_NAMES):
+                    continue
+                try:
+                    vals = [float(x) for x in row[:len(COLUMN_NAMES)]]
+                except Exception:
+                    continue
+                cleaned.append(vals)
 
+            if not cleaned:
+                print("[CSVPlayer] no valid rows after cleaning")
+                return
+
+            # 3) tenmilis 스케일 판별 & 시간 기준 정렬
+            self._decide_ten_div(cleaned)
+            cleaned.sort(key=self._abs_time_row)
+
+            # 4) 재생 루프 준비
+            dt = 1.0 / max(1e-3, self.hz)
+            next_t = time.perf_counter()
+
+            buf_rows, buf_t = [], []
+
+            # UI 스로틀
+            ui_dt = 1.0 / self._UI_FPS
+            next_ui = time.perf_counter()
+
+            def flush_batch():
+                """모아둔 t/rows를 한 번에 datahub에 반영 (락은 내부에서 처리)."""
+                if not buf_rows:
+                    return
+                t_arr = np.asarray(buf_t, dtype=float)
+                # 시간 → 데이터 순으로 배치 반영
+                self.datahub.append_time_batch(t_arr)
+                self.datahub.batch_update(buf_rows)
+                buf_rows.clear()
+                buf_t.clear()
+
+            # 5) 메인 재생 루프
+            for vals in cleaned:
+                if not self._running:
+                    break
+
+                while self._paused and self._running:
+                    time.sleep(0.05)
+
+                # 단조시간 버퍼링
+                try:
+                    h, m, s, ten = vals[0], vals[1], vals[2], vals[3]
+                    self._feed_monotonic_time_to_buf(h, m, s, ten, buf_t)
+                except Exception as e:
+                    print(f"[CSVPlayer] time gen error: {e}")
+
+                # 데이터 버퍼링
+                buf_rows.append(vals)
+                if len(buf_rows) >= self._BATCH:
+                    flush_batch()
+
+                # UI 스로틀
+                now = time.perf_counter()
+                if now >= next_ui:
+                    flush_batch()
+                    self.sampleReady.emit()
+                    next_ui = now + ui_dt
+
+                # 재생 속도 제어
+                next_t += dt
+                sleep_for = next_t - time.perf_counter()
+                if sleep_for > 0:
+                    time.sleep(sleep_for)
+                else:
+                    next_t = time.perf_counter()
+
+            # 6) 종료 전 잔여 플러시 + 최종 UI 갱신
+            flush_batch()
             self.sampleReady.emit()
 
-            # (5) 재생 속도 제어
-            next_t += dt
-            sleep_for = next_t - time.perf_counter()
-            if sleep_for > 0:
-                time.sleep(sleep_for)
-            else:
-                next_t = time.perf_counter()
+        except Exception as e:
+            import traceback
+            print("[CSVPlayer] FATAL:", e)
+            traceback.print_exc()
 
 class TimeAxisItem(AxisItem):
     def __init__(self, *args, **kwargs):

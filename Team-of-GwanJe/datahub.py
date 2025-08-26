@@ -16,14 +16,14 @@ class Datahub:
         self.sender_error = -1              # Sender용: -1(대기), 0(정상), 1(오류)
 
         # 스레드 락 (수신/시각화 경합 방지)
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
 
         # ---------- 시간 ----------
         self.hours    = np.empty(0, dtype=np.uint8)
         self.mins     = np.empty(0, dtype=np.uint8)
         self.secs     = np.empty(0, dtype=np.uint8)
         self.tenmilis = np.empty(0, dtype=np.uint8)
-        self.t        = np.empty(0, dtype=np.float32)  # 누적초
+        self.t        = np.empty(0, dtype=np.float64)  # 누적초(시간은 정밀도 위해 float64)
 
         # ---------- ECEF 입력 (이름은 East/North/Up이지만 ECEF임: X/Y/Z) ----------
         self.Easts  = np.empty(0, dtype=np.float32)  # X
@@ -70,7 +70,7 @@ class Datahub:
         self.button_data  = np.array([], dtype=np.uint8)
         self.button_names = [
             "launch", "launch_stop", "emergency_parachute",
-            "staging_stop", "emergency_staging",  # ← 오타 수정
+            "staging_stop", "emergency_staging",
             "nc1_button", "nc2_button", "nc3_button"
         ]
 
@@ -161,6 +161,12 @@ class Datahub:
             self._ref_lla  = (lat0, lon0, h0)
             self._ref_ecef = np.array([x, y, z], float)
 
+    def append_time_batch(self, t_arr):
+        """단조시간 배열을 배치로 붙임 (내부 락 포함)"""
+        t_arr = np.asarray(t_arr, dtype=float)
+        with self.lock:
+            self.t = t_arr if self.t.size == 0 else np.concatenate((self.t, t_arr))
+
     # ---------- 통신 제어 ----------
     def communication_start(self):
         self.iscommunication_start = True
@@ -175,7 +181,6 @@ class Datahub:
         self.isdatasaver_start = 0
 
     def check_communication_error(self, timeout=2.0, poll_ms=50):
-        """serial_port_error가 -1에서 0/1로 바뀔 때까지 기다림. 0=정상, 1=에러."""
         deadline = time.perf_counter() + timeout
         while True:
             s = self.serial_port_error
@@ -186,10 +191,6 @@ class Datahub:
             time.sleep(poll_ms / 1000.0)
 
     def check_sender_error(self, timeout=2.0, poll_ms=50):
-        """
-        sender_error가 -1에서 0/1로 바뀔 때까지 기다림. 0=정상, 1=에러.
-        Sender 스레드가 전송 성공 시 0, 실패 시 1을 설정해야 함.
-        """
         deadline = time.perf_counter() + timeout
         while True:
             s = self.sender_error
@@ -273,7 +274,7 @@ class Datahub:
         q0, q1, q2, q3 = map(float, datas[13:17])
         w_p, w_y, w_r  = map(float, datas[17:20])
 
-        # 누적 시간(sec)
+        # 누적 시간(sec) — 라이브는 10 ms 단위 가정
         tsec = float(h)*3600.0 + float(m)*60.0 + float(s) + float(tm)/100.0
 
         with self.lock:
@@ -282,7 +283,7 @@ class Datahub:
             self.mins     = np.append(self.mins,     np.uint8(m))
             self.secs     = np.append(self.secs,     np.uint8(s))
             self.tenmilis = np.append(self.tenmilis, np.uint8(tm))
-            self.t        = np.append(self.t,        np.float32(tsec))
+            self.t        = np.append(self.t,        np.float64(tsec))
 
             # ECEF pos/vel
             self.Easts  = np.append(self.Easts,  np.float32(E))
@@ -338,57 +339,126 @@ class Datahub:
             self.yspeed = np.append(self.yspeed, np.float32(vN_e))
             self.zspeed = np.append(self.zspeed, np.float32(vU_e))
 
-    # ---------- CSV/행 입력 ----------
     def update_from_row(self, row):
-        (hours, mins, secs, tenmilis,
-         x, y, z, vx, vy, vz,
-         a_p, a_y, a_r,
-         q0, q1, q2, q3,
-         w_p, w_y, w_r, *rest) = row
+        """단일 샘플 업데이트 (라이브/CSV 공통). 내부적으로 batch_update 사용."""
+        self.batch_update([row])
+
+    def batch_update(self, rows):
+        """
+        rows: list[list/tuple] (각 row는 20열 이상)
+        - per-sample np.append 제거
+        - numpy로 캐스팅 후, 한 번에 concatenate
+        - ENU/오일러/스칼라 속도도 묶음으로 계산/적용
+        """
+        if not rows:
+            return
+
+        A = np.asarray(rows, dtype=float)
+        if A.ndim != 2 or A.shape[1] < 20:
+            return
+
+        hours    = A[:, 0].astype(np.uint8,  copy=False)
+        mins     = A[:, 1].astype(np.uint8,  copy=False)
+        secs     = A[:, 2].astype(np.uint8,  copy=False)
+        tenmilis = A[:, 3].astype(np.uint8,  copy=False)
+
+        x,  y,  z  = A[:, 4].astype(np.float32),  A[:, 5].astype(np.float32),  A[:, 6].astype(np.float32)
+        vx, vy, vz = A[:, 7].astype(np.float32),  A[:, 8].astype(np.float32),  A[:, 9].astype(np.float32)
+
+        a_p, a_y, a_r = A[:,10].astype(np.float32), A[:,11].astype(np.float32), A[:,12].astype(np.float32)
+        q0, q1, q2, q3 = (A[:,13].astype(np.float32), A[:,14].astype(np.float32),
+                          A[:,15].astype(np.float32), A[:,16].astype(np.float32))
+        w_p, w_y, w_r = A[:,17].astype(np.float32), A[:,18].astype(np.float32), A[:,19].astype(np.float32)
+
+        # 파생값
+        self._ensure_ref_from_first_ecef(float(x[0]), float(y[0]), float(z[0]))
+        lat0, lon0, _ = self._ref_lla
+
+        rolls, pitchs, yaws = [], [], []
+        e_list, n_list, u_list = [], [], []
+        vE_list, vN_list, vU_list = [], [], []
+
+        for i in range(A.shape[0]):
+            r, p, y_ = Datahub.euler_from_quat_body_to_enu_zxy(
+                float(q0[i]), float(q1[i]), float(q2[i]), float(q3[i]),
+                float(lat0), float(lon0)
+            )
+            rolls.append(np.float32(r)); pitchs.append(np.float32(p)); yaws.append(np.float32(y_))
+
+            e, n, u = self._ecef_to_enu(np.array([x[i], y[i], z[i]], dtype=float),
+                                        self._ref_ecef, float(lat0), float(lon0))
+            e_list.append(np.float32(e)); n_list.append(np.float32(n)); u_list.append(np.float32(u))
+
+            vE_e, vN_e, vU_e = self._ecef_vec_to_enu(np.array([vx[i], vy[i], vz[i]], dtype=float),
+                                                     float(lat0), float(lon0))
+            vE_list.append(np.float32(vE_e)); vN_list.append(np.float32(vN_e)); vU_list.append(np.float32(vU_e))
+
+        rolls  = np.asarray(rolls,  dtype=np.float32)
+        pitchs = np.asarray(pitchs, dtype=np.float32)
+        yaws   = np.asarray(yaws,   dtype=np.float32)
+
+        e_chunk  = np.asarray(e_list,  dtype=np.float32)
+        n_chunk  = np.asarray(n_list,  dtype=np.float32)
+        u_chunk  = np.asarray(u_list,  dtype=np.float32)
+
+        vE_chunk = np.asarray(vE_list, dtype=np.float32)
+        vN_chunk = np.asarray(vN_list, dtype=np.float32)
+        vU_chunk = np.asarray(vU_list, dtype=np.float32)
+
+        # 스칼라 속도(ENU 기준)도 배치로 계산
+        spd_chunk = np.sqrt(vE_chunk*vE_chunk + vN_chunk*vN_chunk + vU_chunk*vU_chunk).astype(np.float32)
+        yspd_chunk = vN_chunk.copy()
+        zspd_chunk = vU_chunk.copy()
 
         with self.lock:
-            self.hours    = np.append(self.hours,    np.uint8(hours))
-            self.mins     = np.append(self.mins,     np.uint8(mins))
-            self.secs     = np.append(self.secs,     np.uint8(secs))
-            self.tenmilis = np.append(self.tenmilis, np.uint8(tenmilis))
+            # 시간 (주의: CSVPlayer가 t는 append_time_batch로 별도 처리)
+            self.hours    = hours    if self.hours.size    == 0 else np.concatenate((self.hours,    hours))
+            self.mins     = mins     if self.mins.size     == 0 else np.concatenate((self.mins,     mins))
+            self.secs     = secs     if self.secs.size     == 0 else np.concatenate((self.secs,     secs))
+            self.tenmilis = tenmilis if self.tenmilis.size == 0 else np.concatenate((self.tenmilis, tenmilis))
 
-            self.Easts  = np.append(self.Easts,  np.float32(x))
-            self.Norths = np.append(self.Norths, np.float32(y))
-            self.Ups    = np.append(self.Ups,    np.float32(z))
+            # 위치/속도(ECEF)
+            self.Easts  = x  if self.Easts.size   == 0 else np.concatenate((self.Easts,  x))
+            self.Norths = y  if self.Norths.size  == 0 else np.concatenate((self.Norths, y))
+            self.Ups    = z  if self.Ups.size     == 0 else np.concatenate((self.Ups,    z))
 
-            self.vE = np.append(self.vE, np.float32(vx))
-            self.vN = np.append(self.vN, np.float32(vy))
-            self.vU = np.append(self.vU, np.float32(vz))
+            self.vE = vx if self.vE.size == 0 else np.concatenate((self.vE, vx))
+            self.vN = vy if self.vN.size == 0 else np.concatenate((self.vN, vy))
+            self.vU = vz if self.vU.size == 0 else np.concatenate((self.vU, vz))
 
-            self.Xaccels     = np.append(self.Xaccels,     np.float32(a_p))
-            self.Yaccels     = np.append(self.Yaccels,     np.float32(a_y))
-            self.Zaccels     = np.append(self.Zaccels,     np.float32(a_r))
-            self.rollSpeeds  = np.append(self.rollSpeeds,  np.float32(w_p))
-            self.pitchSpeeds = np.append(self.pitchSpeeds, np.float32(w_y))
-            self.yawSpeeds   = np.append(self.yawSpeeds,   np.float32(w_r))
+            # 가속/각속
+            self.Xaccels     = a_p if self.Xaccels.size     == 0 else np.concatenate((self.Xaccels,     a_p))
+            self.Yaccels     = a_y if self.Yaccels.size     == 0 else np.concatenate((self.Yaccels,     a_y))
+            self.Zaccels     = a_r if self.Zaccels.size     == 0 else np.concatenate((self.Zaccels,     a_r))
+            self.rollSpeeds  = w_p if self.rollSpeeds.size  == 0 else np.concatenate((self.rollSpeeds,  w_p))
+            self.pitchSpeeds = w_y if self.pitchSpeeds.size == 0 else np.concatenate((self.pitchSpeeds, w_y))
+            self.yawSpeeds   = w_r if self.yawSpeeds.size   == 0 else np.concatenate((self.yawSpeeds,   w_r))
 
-            self.q0 = np.append(self.q0, np.float32(q0))
-            self.q1 = np.append(self.q1, np.float32(q1))
-            self.q2 = np.append(self.q2, np.float32(q2))
-            self.q3 = np.append(self.q3, np.float32(q3))
+            # 쿼터니언
+            self.q0 = q0 if self.q0.size == 0 else np.concatenate((self.q0, q0))
+            self.q1 = q1 if self.q1.size == 0 else np.concatenate((self.q1, q1))
+            self.q2 = q2 if self.q2.size == 0 else np.concatenate((self.q2, q2))
+            self.q3 = q3 if self.q3.size == 0 else np.concatenate((self.q3, q3))
 
-            self._ensure_ref_from_first_ecef(float(x), float(y), float(z))
-            lat0, lon0, _ = self._ref_lla
+            # 오일러
+            self.rolls  = rolls  if self.rolls.size  == 0 else np.concatenate((self.rolls,  rolls))
+            self.pitchs = pitchs if self.pitchs.size == 0 else np.concatenate((self.pitchs, pitchs))
+            self.yaws   = yaws   if self.yaws.size   == 0 else np.concatenate((self.yaws,   yaws))
 
-            r, p, y_ = Datahub.euler_from_quat_body_to_enu_zxy(q0, q1, q2, q3, lat0, lon0)
-            self.rolls  = np.append(self.rolls,  np.float32(r))
-            self.pitchs = np.append(self.pitchs, np.float32(p))
-            self.yaws   = np.append(self.yaws,   np.float32(y_))
+            # ENU 위치/속도
+            self.e_enu = e_chunk  if self.e_enu.size == 0 else np.concatenate((self.e_enu, e_chunk))
+            self.n_enu = n_chunk  if self.n_enu.size == 0 else np.concatenate((self.n_enu, n_chunk))
+            self.u_enu = u_chunk  if self.u_enu.size == 0 else np.concatenate((self.u_enu, u_chunk))
 
-            e, n, u = self._ecef_to_enu(np.array([x, y, z], float), self._ref_ecef, lat0, lon0)
-            self.e_enu = np.append(self.e_enu, np.float32(e))
-            self.n_enu = np.append(self.n_enu, np.float32(n))
-            self.u_enu = np.append(self.u_enu, np.float32(u))
+            self.vE_enu = vE_chunk if self.vE_enu.size == 0 else np.concatenate((self.vE_enu, vE_chunk))
+            self.vN_enu = vN_chunk if self.vN_enu.size == 0 else np.concatenate((self.vN_enu, vN_chunk))
+            self.vU_enu = vU_chunk if self.vU_enu.size == 0 else np.concatenate((self.vU_enu, vU_chunk))
 
-            vE_e, vN_e, vU_e = self._ecef_vec_to_enu(np.array([vx, vy, vz], float), lat0, lon0)
-            self.vE_enu = np.append(self.vE_enu, np.float32(vE_e))
-            self.vN_enu = np.append(self.vN_enu, np.float32(vN_e))
-            self.vU_enu = np.append(self.vU_enu, np.float32(vU_e))
+            # 스칼라 속도
+            self.speed  = spd_chunk  if self.speed.size  == 0 else np.concatenate((self.speed,  spd_chunk))
+            self.yspeed = yspd_chunk if self.yspeed.size == 0 else np.concatenate((self.yspeed, yspd_chunk))
+            self.zspeed = zspd_chunk if self.zspeed.size == 0 else np.concatenate((self.zspeed, zspd_chunk))
 
     def clear(self):
+        # 전체 초기화 (락 포함). 외부에서 호출 시 동시 접근 없도록 주의.
         self.__init__()
