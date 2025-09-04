@@ -26,6 +26,8 @@ from matplotlib.animation import FuncAnimation
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib import pyplot as plt
 
+import traceback
+
 from datetime import timedelta
 from os.path import abspath, dirname, join, exists
 from sys import exit, argv
@@ -1458,8 +1460,7 @@ class CSVPlayer(QThread):
             try:
                 df = pd.read_csv(self.csv_path, header=None, names=COLUMN_NAMES, dtype=str)
             except Exception as e:
-                import traceback
-                print("[CSVPlayer] FATAL while reading CSV:", e)
+                #print("[CSVPlayer] FATAL while reading CSV:", e)
                 traceback.print_exc()
                 return
 
@@ -1475,7 +1476,7 @@ class CSVPlayer(QThread):
                 cleaned.append(vals)
 
             if not cleaned:
-                print("[CSVPlayer] no valid rows after cleaning")
+                #print("[CSVPlayer] no valid rows after cleaning")
                 return
 
             # 3) tenmilis 스케일 판별 & 시간 기준 정렬
@@ -1509,14 +1510,15 @@ class CSVPlayer(QThread):
                     break
 
                 while self._paused and self._running:
-                    time.sleep(0.05)
+                    time.sleep(0.005)
 
                 # 단조시간 버퍼링
                 try:
                     h, m, s, ten = vals[0], vals[1], vals[2], vals[3]
                     self._feed_monotonic_time_to_buf(h, m, s, ten, buf_t)
                 except Exception as e:
-                    print(f"[CSVPlayer] time gen error: {e}")
+                    pass
+                    #print(f"[CSVPlayer] time gen error: {e}")
 
                 # 데이터 버퍼링
                 buf_rows.append(vals)
@@ -1534,7 +1536,7 @@ class CSVPlayer(QThread):
                 next_t += dt
                 sleep_for = next_t - time.perf_counter()
                 if sleep_for > 0:
-                    time.sleep(sleep_for)
+                    time.sleep(0.005)
                 else:
                     next_t = time.perf_counter()
 
@@ -1543,8 +1545,7 @@ class CSVPlayer(QThread):
             self.sampleReady.emit()
 
         except Exception as e:
-            import traceback
-            print("[CSVPlayer] FATAL:", e)
+            #print("[CSVPlayer] FATAL:", e)
             traceback.print_exc()
 
 class TimeAxisItem(AxisItem):
