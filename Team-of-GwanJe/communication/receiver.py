@@ -8,17 +8,18 @@ import numpy as np
 # ---- 프로토콜 합의 ----
 HEAD = b'AB'
 TAIL = b'Z'
-FMT_BODY = '<BBBB16fB'                          # 시간4 + 16*float32 + u8 checksum
-BODY_SIZE = calcsize(FMT_BODY)                  # 69
-HEADER_SIZE = 3                                 # 'A','B', len
-PACKET_SIZE = HEADER_SIZE + BODY_SIZE + 1       # + 'Z' = 73
+# CHANGED: 16 * float64('d') 로 변경, 끝에 u8 체크섬
+FMT_BODY = '<BBBB16dB'                         # 시간4 + 16*float64 + u8 checksum
+BODY_SIZE = calcsize(FMT_BODY)                 # CHANGED: 133
+HEADER_SIZE = 3                                # 'A','B', len
+PACKET_SIZE = HEADER_SIZE + BODY_SIZE + 1      # CHANGED: + 'Z' = 137
 
-#패킷 'A', 'B', len, h, m, s, ms, 
-#     ECEF_x, ECEF_y, ECEF_z, 
-#     V_E, V_N, V_U, 
-#     a_p, a_y, a_r, 
-#     q0, q1, q2, q3, 
-#     w_p, w_y, w_r, 
+#패킷 'A', 'B', len, h, m, s, tenms,
+#     est_x, est_y, est_z,
+#     est_vx, est_vy, est_vz,
+#     a_x, a_y, a_z,
+#     q0, q1, q2, q3,
+#     w_x, w_y, w_z,
 #     checksum, 'Z'
 
 class Receiver(Thread):
@@ -60,24 +61,24 @@ class Receiver(Thread):
         return bytes(buf)
 
     def _parse_body(self, body: bytes) -> bool:
-        """본문(69B) 파싱 + u8 체크섬 검증 후 datahub에 반영."""
+        """본문(133B) 파싱 + u8 체크섬 검증 후 datahub에 반영."""
         if len(body) != BODY_SIZE:
             return False
 
-        # u8 checksum over (time4 + 16*float32) == body[:-1]
+        # CHANGED: u8 checksum over (time4 + 16*float64) == body[:-1] (총 132B)
         cs_calc = sum(body[:-1]) & 0xFF
         cs_rx   = body[-1]
         if cs_calc != cs_rx:
             return False
 
-        # unpack: h,m,s,tm, (16 floats), cs
+        # unpack: h,m,s,tenms, (16 doubles), cs
         tup = unpack(FMT_BODY, body)
-        h, m, s, tm = tup[:4]
-        floats16    = tup[4:-1]   # 16개 float
+        h, m, s, tenms = tup[:4]
+        floats16       = tup[4:-1]   # 16개 double
         # cs = tup[-1]  # 이미 위에서 검증 완료
 
-        # datahub로 전달 (기존 update 시그니처 유지)
-        out = np.array([h, m, s, tm, *floats16], dtype=np.float32)
+        # CHANGED: 기존 update 시그니처 유지 위해 float32로 캐스팅해서 전달
+        out = np.array([h, m, s, tenms, *floats16], dtype=np.float32)
         self.datahub.update(out)
         return True
 
@@ -116,7 +117,7 @@ class Receiver(Thread):
                         hdr_stage = 2 if b == b'B' else 0
                     elif hdr_stage == 2:
                         msg_len = b[0]
-                        # LEN은 본문 길이(=69)여야 함
+                        # CHANGED: LEN은 본문 길이(=133)여야 함
                         if msg_len != BODY_SIZE:
                             hdr_stage = 0
                             # 동기화 전이면 bad_streak 카운트
@@ -126,7 +127,7 @@ class Receiver(Thread):
                                     self.datahub.serial_port_error = 1
                             continue
 
-                        # 본문 69바이트
+                        # 본문 133바이트
                         body = self._read_exact(msg_len)
                         # 테일 1바이트
                         tail = self._read_exact(1)
@@ -166,4 +167,5 @@ if __name__ == "__main__":
         r.start()
         r.join()
     except Exception as e:
-        print("Receiver self-test failed:", e)
+        #print("Receiver self-test failed:", e)
+        pass
