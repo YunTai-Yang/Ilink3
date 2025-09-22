@@ -676,7 +676,7 @@ class RocketViewer_Thread(QThread):
 
     def update_pose(self):
         def _last(arr, default=np.nan):
-            with self.datahub.lock:  # 락 보호
+            with self.datahub.lock:
                 try:
                     return float(arr[-1]) if len(arr) > 0 else float(default)
                 except Exception:
@@ -685,34 +685,33 @@ class RocketViewer_Thread(QThread):
         def _fmt(val, suffix=""):
             return f"{val:.2f}{suffix}" if np.isfinite(val) else "N/A"
 
-        # 1) 오리엔테이션: Datahub가 이미 ENU 기준 Z–X–Y 오일러 제공
-        roll_z  = _last(self.datahub.rolls)   # deg
-        pitch_x = _last(self.datahub.pitchs)  # deg
-        yaw_y   = _last(self.datahub.yaws)    # deg
+        # ENU 기준 Z–X–Y 오일러(roll_z, pitch_x, yaw_y)
+        roll_z  = _last(self.datahub.rolls)    # deg
+        pitch_x = _last(self.datahub.pitchs)   # deg
+        yaw_y   = _last(self.datahub.yaws)     # deg
 
         self.rocket_mesh.resetTransform()
-        self.rocket_mesh.rotate(roll_z,  0, 0, 1)  # Z roll
-        self.rocket_mesh.rotate(pitch_x, 1, 0, 0)  # X pitch
-        self.rocket_mesh.rotate(yaw_y,   0, 1, 0)  # Y yaw
 
-        # 2) 속도: Datahub.speed (ENU 기반) 바로 사용
+        # (1) 모델좌표 → 바디좌표 고정 정렬 (예: nose가 +Z인 OBJ를 +X로 맞춤)
+        #     Up(=ENU Z) 축으로 -90° 회전: +Z → +X 정렬
+        self.rocket_mesh.rotate(-90.0, 0, 0, 1)   # ★ 고정 보정: Z축 -90°
+
+        # (2) 동적 오일러 적용 (intrinsic Z→X→Y; 호출 순서 그대로)
+        self.rocket_mesh.rotate(roll_z,  0, 0, 1) # Z roll (ENU Up)
+        self.rocket_mesh.rotate(pitch_x, 1, 0, 0) # X pitch (ENU East)
+        self.rocket_mesh.rotate(yaw_y,   0, 1, 0) # Y yaw  (ENU North)
+
+        # 속도/고도/라벨은 동일
         spd = _last(self.datahub.speed)
         self.speed_label.setText(f"Speed {_fmt(spd,'m/s')}")
-
-        # 3) 고도 (ENU U값)
         alt = _last(self.datahub.u_enu)
         self.altitude_label.setText(f"Altitude {_fmt(alt,'m')}")
-
-        # 4) 각도 레이블
         self.roll_label.setText(f"Roll : {_fmt(roll_z,'°')}")
         self.pitch_label.setText(f"Pitch : {_fmt(pitch_x,'°')}")
         self.yaw_label.setText(f"Yaw : {_fmt(yaw_y,'°')}")
-
-        # 5) 각속도/가속도 (rad/s, m/s²)
         self.rollspeed_label.setText(f"Roll_speed : {_fmt(_last(self.datahub.rollSpeeds),'Rad/s')}")
         self.pitchspeed_label.setText(f"Pitch_speed : {_fmt(_last(self.datahub.pitchSpeeds),'Rad/s')}")
         self.yawspeed_label.setText(f"Yaw_speed : {_fmt(_last(self.datahub.yawSpeeds),'Rad/s')}")
-
         self.xacc_label.setText(f"X_acc : {_fmt(_last(self.datahub.Xaccels),'m/s²')}")
         self.yacc_label.setText(f"Y_acc : {_fmt(_last(self.datahub.Yaccels),'m/s²')}")
         self.zacc_label.setText(f"Z_acc : {_fmt(_last(self.datahub.Zaccels),'m/s²')}")
